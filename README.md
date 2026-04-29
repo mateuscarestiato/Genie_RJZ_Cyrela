@@ -1,15 +1,11 @@
-<![CDATA[<div align="center">
-
 # 🚀 Genie RJZ Cyrela — Portal do Desenvolvedor Databricks
 
-**Plataforma interativa para consulta de dados, análise de esquemas e otimização de queries SQL, conectada ao Databricks Genie.**
+Plataforma interativa para consulta de dados, análise de esquemas e otimização de queries SQL, conectada ao Databricks Genie.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.44+-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
 [![Databricks](https://img.shields.io/badge/Databricks-Genie_API-FF3621?logo=databricks&logoColor=white)](https://www.databricks.com)
 [![License](https://img.shields.io/badge/Licença-Privado-lightgrey)]()
-
-</div>
 
 ---
 
@@ -24,6 +20,7 @@
 - [Como Executar](#-como-executar)
 - [Guia de Uso](#-guia-de-uso)
 - [Troubleshooting](#-troubleshooting)
+- [Dependências](#-dependências)
 
 ---
 
@@ -42,17 +39,21 @@ O **Genie RJZ Cyrela** é um portal de desenvolvimento que centraliza ferramenta
 ## ✨ Funcionalidades
 
 ### 💬 Genie Chat
+
 Converse com seus dados usando linguagem natural. O Genie interpreta sua pergunta, gera a query SQL, executa no Databricks e retorna os resultados em tabela e gráficos.
 
 | Recurso | Descrição |
-|---|---|
+| --- | --- |
 | **Modo Usuário** | Respostas simples, linguagem de negócio |
 | **Modo Desenvolvedor** | SQL completo, métricas, rastreabilidade |
 | **Gráficos automáticos** | Gerados pelo Genie com base nos dados |
 | **Download** | Exportação em Excel (`.xlsx`) e CSV |
 | **Follow-up** | Perguntas sugeridas clicáveis para manter o contexto |
 
+---
+
 ### 📚 Dicionário e Perfil de Dados (Profiling)
+
 Selecione qualquer tabela do schema `dev.iops_rj` e obtenha automaticamente:
 
 - **Esquema completo** — nome, tipo e comentário de cada coluna.
@@ -60,7 +61,10 @@ Selecione qualquer tabela do schema `dev.iops_rj` e obtenha automaticamente:
 
 > 💡 A lista de tabelas é carregada dinamicamente via `SHOW TABLES IN dev.iops_rj`.
 
+---
+
 ### ⚡ Otimizador e Revisor SQL (Linter)
+
 Cole qualquer query SQL e receba uma análise técnica completa via Genie:
 
 1. **Resumo** do que a query faz.
@@ -68,24 +72,30 @@ Cole qualquer query SQL e receba uma análise técnica completa via Genie:
 3. **Boas práticas** — legibilidade, padrões de código, nomeação.
 4. **Query refatorada** — versão otimizada pronta para uso.
 
+---
+
 ### ⚖️ Comparador de Ambientes (Dev vs Prod)
+
 Informe duas tabelas (ex: `dev.iops_rj.tabela` e `prd.iops_rj.tabela`) e obtenha um relatório coluna a coluna:
 
 | Status | Significado |
-|---|---|
+| --- | --- |
 | ✅ Iguais | Coluna existe em ambos com o mesmo tipo |
 | ⚠️ Tipo Divergente | Coluna existe em ambos, mas com tipos diferentes |
 | 🛑 Falta no DEV | Coluna existe somente na PROD |
 | 🛑 Falta no PROD | Coluna existe somente no DEV |
 
+---
+
 ### 🔗 Linhagem de Dados
+
 Visualize graficamente as relações entre tabelas usando grafos interativos (Plotly), com tamanho fixo de 1200×800px para leitura clara dos nomes e conexões.
 
 ---
 
 ## 🏗 Arquitetura
 
-```
+```text
 📦 Genie_RJZ_Cyrela/
 ├── 📄 genie_web_app.py       # Interface Streamlit (Portal principal)
 ├── 📄 genie_chat.py           # Client da API REST do Databricks Genie
@@ -117,13 +127,21 @@ cd Genie_RJZ_Cyrela
 
 # 2. Crie e ative um ambiente virtual
 python -m venv .venv
+```
 
-# Windows (PowerShell)
+**Windows (PowerShell):**
+
+```powershell
 .\.venv\Scripts\Activate.ps1
+```
 
-# Linux / macOS
+**Linux / macOS:**
+
+```bash
 source .venv/bin/activate
+```
 
+```bash
 # 3. Instale as dependências
 pip install -r requirements.txt
 
@@ -190,7 +208,7 @@ python genie_chat.py --question "Top 10 clientes por receita" --no-followup
 **Argumentos opcionais do CLI:**
 
 | Argumento | Padrão | Descrição |
-|---|---|---|
+| --- | --- | --- |
 | `--poll-seconds` | `2` | Intervalo de polling |
 | `--timeout-seconds` | `600` | Timeout por pergunta |
 | `--max-rows` | `20` | Linhas exibidas no terminal |
@@ -220,19 +238,19 @@ No modo **Desenvolvedor**, a barra lateral apresenta o menu **"Ferramentas do De
 ## 🛠 Troubleshooting
 
 | Erro | Causa provável | Solução |
-|---|---|---|
+| --- | --- | --- |
 | `401 Unauthorized` | Token inválido ou expirado | Gere um novo token no Databricks |
 | `403 Forbidden` | Sem permissão no Genie Space | Solicite acesso ao administrador |
 | `404 Not Found` | `GENIE_SPACE_ID` incorreto | Verifique o UUID na URL do Genie Space |
 | Timeout | Query muito pesada | Aumente `GENIE_TIMEOUT_SECONDS` |
-| `PERMISSION_DENIED` no Comparador | Sem acesso ao catálogo remoto | Solicite permissão no catálogo (`prd`) |
+| `PERMISSION_DENIED` | Sem acesso ao catálogo remoto | Solicite permissão no catálogo (`prd`) |
 
 ---
 
 ## 🧰 Dependências
 
 | Pacote | Versão mínima | Finalidade |
-|---|---|---|
+| --- | --- | --- |
 | `requests` | 2.32.0 | Chamadas HTTP à API do Databricks |
 | `python-dotenv` | 1.0.1 | Leitura de variáveis do `.env` |
 | `streamlit` | 1.44.0 | Interface web interativa |
@@ -243,9 +261,4 @@ No modo **Desenvolvedor**, a barra lateral apresenta o menu **"Ferramentas do De
 
 ---
 
-<div align="center">
-
 **Desenvolvido pelo time de Engenharia de Dados — RJZ Cyrela**
-
-</div>
-]]>
