@@ -259,6 +259,18 @@ No modo **Desenvolvedor**, a barra lateral apresenta o menu **"Ferramentas do De
 | `pillow` | 10.4.0 | Processamento de imagens (avatares) |
 | `openpyxl` | 3.1.5 | Exportação para Excel |
 
+## 📈 Ganhos e Impacto (KPIs)
+
+Para medir o sucesso do projeto, acompanhamos os seguintes indicadores:
+
+| Pilar | KPI | Impacto Esperado |
+| --- | --- | --- |
+| **Produtividade** | Time-to-Answer (TTA) | Redução de >80% no tempo para obter respostas de dados. |
+| **Eficiência** | Custo de DBUs (Databricks) | Redução de custos via queries otimizadas pelo Linter. |
+| **Autonomia** | % de Self-Service | Aumento no número de usuários de negócio consultando dados sem auxílio técnico. |
+| **Qualidade** | Erros de Schema em Prod | Redução de falhas em produção via Comparador de Ambientes. |
+
 ---
 
 **Desenvolvido pelo time de Engenharia de Dados — RJZ Cyrela**
+

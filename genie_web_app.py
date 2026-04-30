@@ -2,6 +2,7 @@ import os
 import json
 import re
 import base64
+from datetime import datetime
 from html import escape
 from io import BytesIO
 from pathlib import Path
@@ -97,6 +98,27 @@ def encode_image_base64_if_exists(image_path: Optional[Path]) -> str:
     if image_path is None or not image_path.exists():
         return ""
     return get_cached_image_base64(str(image_path.resolve()))
+
+
+def log_usage(tool_name: str, details: Optional[str] = None) -> None:
+    """
+    Simula o registro de uso das ferramentas para medição de KPI.
+    Em um cenário real, isso gravaria em uma tabela Delta no Databricks.
+    """
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user = os.getenv("USER", "unknown_user")
+        log_entry = {
+            "timestamp": timestamp,
+            "user": user,
+            "tool": tool_name,
+            "details": details
+        }
+        # Por enquanto, apenas logamos no terminal para fins de demonstração
+        print(f"[KPI LOG] {json.dumps(log_entry)}")
+    except Exception as e:
+        print(f"Erro ao registrar log: {e}")
+
 
 
 def normalize_asset_key(value: str) -> str:
@@ -1881,6 +1903,7 @@ def render_table_lineage_section(config: Dict[str, Any]) -> None:
 
 
 def render_data_dictionary_and_profiling(config: Dict[str, Any]) -> None:
+    log_usage("Data Dictionary & Profiling")
     st.header("📚 Dicionário e Perfil de Dados (Profiling)")
     st.write("Visualize os metadados e a distribuição estatística dos dados (Data Profiling) das tabelas no esquema `dev.iops_rj`.")
     
@@ -2018,6 +2041,7 @@ def render_data_dictionary_and_profiling(config: Dict[str, Any]) -> None:
                 st.error(f"Erro na análise: {e}")
 
 def render_sql_optimizer(config: Dict[str, Any]) -> None:
+    log_usage("SQL Optimizer")
     st.header("⚡ Otimizador e Revisor SQL (Linter)")
     st.write("Cole sua query abaixo para receber análises de performance, dicas de otimização e revisão automática de boas práticas de código (SQL Linter) no Databricks.")
     
@@ -2070,6 +2094,7 @@ def render_sql_optimizer(config: Dict[str, Any]) -> None:
                 st.error(f"Falha ao analisar a query: {e}")
 
 def render_environment_comparator(config: Dict[str, Any]) -> None:
+    log_usage("Environment Comparator")
     st.header("⚖️ Comparador de Ambientes (Dev vs Prod)")
     st.write("Compare os esquemas (schemas) de duas tabelas para identificar colunas faltantes ou tipos de dados divergentes.")
     
@@ -2159,6 +2184,7 @@ def render_environment_comparator(config: Dict[str, Any]) -> None:
                     st.error(f"Erro durante a comparação: {e}")
 
 def run_genie_chat_mode(config: Dict[str, Any], ui_mode: str) -> None:
+    log_usage("Genie Chat", details=f"Mode: {ui_mode}")
     render_genie_space_tables(config)
     render_table_lineage_section(config)
     render_messages(ui_mode)
