@@ -84,11 +84,74 @@ class GenieApiClient:
             ),
         )
 
-    def get_space(self) -> Dict[str, Any]:
+    def list_spaces(self) -> Dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/2.0/genie/spaces",
+        )
+
+    def get_space(self, include_serialized_space: bool = False) -> Dict[str, Any]:
+        params = {}
+        if include_serialized_space:
+            params["include_serialized_space"] = "true"
         return self._request(
             "GET",
             f"/api/2.0/genie/spaces/{self.space_id}",
+            params=params
         )
+
+    def ask_question(self, question: str, poll_seconds: float = 1.0, timeout_seconds: int = 60) -> Dict[str, Any]:
+        """
+        Inicia uma conversa e aguarda a resposta final (terminal).
+        Retorna a mensagem final e o texto da resposta.
+        """
+        start_res = self.start_conversation(question)
+        message = start_res.get("message") or {}
+        message_id = extract_message_id(message)
+        conversation = start_res.get("conversation") or {}
+        conversation_id = extract_conversation_id(conversation)
+        
+        if not conversation_id or not message_id:
+            raise RuntimeError("Não foi possível iniciar a conversa com o Genie.")
+            
+        final_msg = wait_for_terminal_message(
+            self, 
+            conversation_id, 
+            message_id, 
+            poll_seconds,
+            timeout_seconds
+        )
+        
+        # Robust text extraction
+        text = ""
+        text_obj = final_msg.get("text")
+        if isinstance(text_obj, dict):
+            text = text_obj.get("plain_text", "")
+        elif isinstance(text_obj, str):
+            text = text_obj
+            
+        if not text:
+            # Fallback for empty responses or unusual structures
+            status = final_msg.get("status", "UNKNOWN")
+            if status == "SUCCEEDED":
+                text = "Solicitação processada com sucesso, mas nenhum texto foi retornado."
+            else:
+                error_obj = final_msg.get("error")
+                if error_obj:
+                    text = f"O Genie falhou com erro: {json.dumps(error_obj, ensure_ascii=False)}"
+                else:
+                    text = f"O Genie finalizou com status: {status}"
+
+            
+        return {
+            "message": text,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "full_response": final_msg
+        }
+
+
+
 
     def execute_sql_statement(
         self,
@@ -175,6 +238,25 @@ class GenieApiClient:
             timeout_seconds=timeout_seconds,
             poll_seconds=poll_seconds,
         )
+
+    def create_space(
+        self, 
+        title: str, 
+        warehouse_id: str, 
+        description: Optional[str] = None, 
+        serialized_space: Optional[str] = None
+    ) -> Dict[str, Any]:
+        payload = {
+            "title": title,
+            "warehouse_id": warehouse_id,
+        }
+        if description:
+            payload["description"] = description
+        if serialized_space:
+            payload["serialized_space"] = serialized_space
+            
+        return self._request("POST", "/api/2.0/genie/spaces", payload=payload)
+
 
 
 def extract_message_id(payload: Dict[str, Any]) -> Optional[str]:

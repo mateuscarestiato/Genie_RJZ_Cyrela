@@ -120,6 +120,20 @@ def log_usage(tool_name: str, details: Optional[str] = None) -> None:
         print(f"Erro ao registrar log: {e}")
 
 
+def extract_warehouse_id(input_str: str) -> str:
+    """
+    Extrai o ID do warehouse de uma string que pode ser o ID puro ou o HTTP Path.
+    Ex: /sql/1.0/warehouses/ab0de84dfac97072 -> ab0de84dfac97072
+    """
+    if not input_str:
+        return ""
+    match = re.search(r"warehouses/([a-f0-9]+)", input_str)
+    if match:
+        return match.group(1)
+    return input_str.strip()
+
+
+
 
 def normalize_asset_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
@@ -432,6 +446,10 @@ def init_state() -> None:
     st.session_state.assistant_avatar = resolve_assistant_avatar()
     st.session_state.user_avatar = resolve_user_avatar()
 
+    if "create_space_selected_tables" not in st.session_state:
+        st.session_state.create_space_selected_tables = []
+
+
 
 def render_top_branding() -> None:
     top_cover_light_path = resolve_asset_by_candidates(APP_TOP_COVER_LIGHT_CANDIDATES)
@@ -682,52 +700,110 @@ def probe_table_names_via_genie(client: GenieApiClient) -> List[str]:
 
 @st.cache_data(show_spinner=False, ttl=300)
 def get_cached_genie_space_tables(host: str, token: str, space_id: str) -> Tuple[pd.DataFrame, int, str]:
-    if not host or not token or not space_id:
+    if not host or not token or not space_id or space_id == "dummy":
         return pd.DataFrame(), 0, ""
 
     try:
         client = GenieApiClient(host=host, token=token, space_id=space_id)
-        space_payload = client.get_space()
-        warehouse_id = space_payload.get("warehouse_id")
-        if not isinstance(warehouse_id, str) or not warehouse_id.strip():
-            return pd.DataFrame(), 0, "warehouse_id não disponível no Genie Space."
-
-        sql_payload = client.execute_sql_statement(
-            warehouse_id=warehouse_id.strip(),
-            statement=GENIE_SPACE_TABLES_QUERY,
-            timeout_seconds=90,
-            poll_seconds=1.0,
-        )
-
-        manifest = sql_payload.get("manifest") or {}
-        schema = manifest.get("schema") or {}
-        columns = schema.get("columns") or []
-        col_names = [str(col.get("name", "")).strip() for col in columns]
-        result = sql_payload.get("result") or {}
-        rows = result.get("data_array") or []
-
-        if not rows:
-            return pd.DataFrame(columns=["table_catalog", "table_schema", "table_name", "total_tabelas"]), 0, ""
-
-        df = pd.DataFrame(rows)
-        if len(col_names) == df.shape[1] and col_names:
-            df.columns = col_names
-
-        expected_cols = ["table_catalog", "table_schema", "table_name", "total_tabelas"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = ""
-
-        df = df[expected_cols]
-        if "total_tabelas" in df.columns:
-            df["total_tabelas"] = pd.to_numeric(df["total_tabelas"], errors="coerce").fillna(0).astype(int)
-            total = int(df["total_tabelas"].iloc[0]) if not df.empty else 0
+        # Fetch space with serialized content to see configured tables
+        space_payload = client.get_space(include_serialized_space=True)
+        
+        serialized_space = space_payload.get("serialized_space", "{}")
+        if isinstance(serialized_space, str):
+            try:
+                config_json = json.loads(serialized_space)
+            except:
+                config_json = {}
         else:
-            total = int(len(df))
+            config_json = serialized_space
 
-        return df, total, ""
+        tables_list = config_json.get("data_sources", {}).get("tables") or []
+
+        
+        table_rows = []
+        for t in tables_list:
+            identifier = str(t.get("identifier") or "")
+            if not identifier:
+                continue
+            parts = identifier.split(".")
+
+            if len(parts) == 3:
+                catalog, schema, name = parts
+            elif len(parts) == 2:
+                catalog, schema, name = "", parts[0], parts[1]
+            else:
+                catalog, schema, name = "", "", identifier
+            
+            table_rows.append({
+                "table_catalog": catalog,
+                "table_schema": schema,
+                "table_name": name
+            })
+
+        if not table_rows:
+            return pd.DataFrame(columns=["table_catalog", "table_schema", "table_name"]), 0, ""
+
+        df = pd.DataFrame(table_rows)
+        return df, len(df), ""
+        
     except Exception as exc:
         return pd.DataFrame(), 0, str(exc)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def get_cached_spaces(host: str, token: str) -> List[Dict[str, Any]]:
+    if not host or not token:
+        return []
+    try:
+        # Use a dummy space_id since list_spaces is top-level
+        client = GenieApiClient(host, token, "dummy")
+        res = client.list_spaces()
+        return res.get("spaces") or []
+
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def get_cached_catalogs(host: str, token: str, raw_warehouse_id: str) -> List[str]:
+    warehouse_id = extract_warehouse_id(raw_warehouse_id)
+    if not host or not token or not warehouse_id:
+        return []
+    try:
+        client = GenieApiClient(host, token, "discovery")
+        res = client.execute_sql_statement(warehouse_id=warehouse_id, statement="SHOW CATALOGS")
+        rows = res.get("result", {}).get("data_array", [])
+        return sorted([row[0] for row in rows])
+    except Exception:
+        return []
+
+@st.cache_data(show_spinner=False, ttl=600)
+def get_cached_schemas(host: str, token: str, raw_warehouse_id: str, catalog: str) -> List[str]:
+    warehouse_id = extract_warehouse_id(raw_warehouse_id)
+    if not host or not token or not warehouse_id or not catalog:
+        return []
+    try:
+        client = GenieApiClient(host, token, "discovery")
+        res = client.execute_sql_statement(warehouse_id=warehouse_id, statement=f"SHOW SCHEMAS IN {catalog}")
+        rows = res.get("result", {}).get("data_array", [])
+        return sorted([row[0] for row in rows])
+    except Exception:
+        return []
+
+@st.cache_data(show_spinner=False, ttl=600)
+def get_cached_tables(host: str, token: str, raw_warehouse_id: str, catalog: str, schema: str) -> List[str]:
+    warehouse_id = extract_warehouse_id(raw_warehouse_id)
+    if not host or not token or not warehouse_id or not catalog or not schema:
+        return []
+    try:
+        client = GenieApiClient(host, token, "discovery")
+        res = client.execute_sql_statement(warehouse_id=warehouse_id, statement=f"SHOW TABLES IN {catalog}.{schema}")
+        rows = res.get("result", {}).get("data_array", [])
+        return sorted([row[1] for row in rows])
+    except Exception:
+        return []
+
+
 
 
 def render_genie_space_tables(config: Dict[str, Any]) -> None:
@@ -744,26 +820,38 @@ def render_genie_space_tables(config: Dict[str, Any]) -> None:
     )
 
     if load_error:
-        st.warning("Não foi possível carregar as tabelas do Genie Space no momento.")
+        st.warning(f"Erro ao carregar tabelas do Genie Space: {load_error}")
         return
 
     if tables_df.empty:
-        st.info("Nenhuma tabela encontrada para table_schema = 'iops_rj'.")
+        st.info("Nenhuma tabela configurada neste Genie Space.")
         return
 
-    st.caption(f"{total_tabelas} tabela(s) identificada(s) no schema iops_rj.")
+    st.caption(f"{total_tabelas} tabela(s) identificada(s) na configuração do Espaço Genie.")
 
-    table_names = (
-        tables_df["table_name"].dropna().astype(str).str.strip().tolist()
-        if "table_name" in tables_df.columns
-        else []
-    )
+    # Build full identifiers
+    table_names = []
+    for _, row in tables_df.iterrows():
+        cat = row.get("table_catalog", "")
+        sch = row.get("table_schema", "")
+        nam = row.get("table_name", "")
+        if cat and sch:
+            full = f"{cat}.{sch}.{nam}"
+        elif sch:
+            full = f"{sch}.{nam}"
+        else:
+            full = nam
+        table_names.append(full)
+    
+    table_names = sorted(table_names)
+
     if table_names:
         st.markdown("**Nomes das tabelas:**")
         items_html = "".join(
-            f"<div style='white-space: nowrap; padding: 2px 0;'>{escape(table_name)}</div>"
+            f"<div style='white-space: nowrap; padding: 2px 0;'>{escape(str(table_name))}</div>"
             for table_name in table_names
         )
+
         st.markdown(
             (
                 "<div style='overflow-x:auto;'>"
@@ -785,6 +873,7 @@ def render_genie_space_tables(config: Dict[str, Any]) -> None:
         )
         if selected_table:
             st.session_state.selected_table = selected_table
+
 
 
 def safe_int(value: Any, default: int) -> int:
@@ -1307,12 +1396,17 @@ def render_sidebar() -> Dict[str, Any]:
         app_mode = st.radio(
             "Navegação", 
             [
+                "🏗️ Criar Novo Genie Space (API)",
                 "💬 Genie Chat", 
+                "🛠️ Gerador de Modelos dbt/Jinja",
                 "📚 Dicionário e Perfil de Dados (Profiling)", 
                 "⚡ Otimizador e Revisor SQL (Linter)",
                 "⚖️ Comparador de Ambientes (Dev vs Prod)"
             ]
+
         )
+
+
         st.session_state["app_mode"] = app_mode
         st.divider()
 
@@ -1329,14 +1423,10 @@ def render_sidebar() -> Dict[str, Any]:
             type="password",
             help="Token PAT/OAuth com acesso ao Genie.",
         )
-        space_id = st.text_input(
-            "GENIE_SPACE_ID",
-            key="config_space_id",
-            type="password",
-            help="ID da room/space Genie. Use o icone de olho para ocultar/exibir.",
-        )
 
         poll_seconds = st.number_input(
+
+
             "GENIE_POLL_SECONDS",
             min_value=0.5,
             max_value=30.0,
@@ -1376,22 +1466,30 @@ def render_sidebar() -> Dict[str, Any]:
     return {
         "host": str(host).strip(),
         "token": str(token).strip(),
-        "space_id": str(space_id).strip(),
+        "space_id": str(st.session_state.get("chat_selected_space_id") or os.getenv("GENIE_SPACE_ID", "")).strip(),
         "poll_seconds": float(poll_seconds),
         "timeout_seconds": int(timeout_seconds),
         "advanced_mode": bool(advanced_mode),
     }
 
 
+
 def get_config_from_state() -> Dict[str, Any]:
+    # Space ID now comes from the chat interface selection
+    space_id = st.session_state.get("chat_selected_space_id")
+    if not space_id:
+        space_id = os.getenv("GENIE_SPACE_ID", "")
+
     return {
         "host": str(st.session_state.get("config_host", "")).strip(),
         "token": str(st.session_state.get("config_token", "")).strip(),
-        "space_id": str(st.session_state.get("config_space_id", "")).strip(),
+        "space_id": str(space_id).strip(),
         "poll_seconds": float(st.session_state.get("config_poll_seconds", DEFAULT_POLL_SECONDS)),
         "timeout_seconds": int(st.session_state.get("config_timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
         "advanced_mode": bool(st.session_state.get("config_advanced_mode", True)),
     }
+
+
 
 
 def apply_sidebar_visibility(active_ui_mode: str) -> None:
@@ -1853,7 +1951,7 @@ def render_table_lineage_section(config: Dict[str, Any]) -> None:
         st.info("Selecione uma tabela da lista acima para visualizar a linhagem.")
         return
 
-    table_input = f"dev.iops_rj.{selected_table}"
+    table_input = selected_table
     direction = "both"
 
     if st.button("Confirmar e visualizar linhagem", key="btn_confirm_lineage"):
@@ -1905,7 +2003,7 @@ def render_table_lineage_section(config: Dict[str, Any]) -> None:
 def render_data_dictionary_and_profiling(config: Dict[str, Any]) -> None:
     log_usage("Data Dictionary & Profiling")
     st.header("📚 Dicionário e Perfil de Dados (Profiling)")
-    st.write("Visualize os metadados e a distribuição estatística dos dados (Data Profiling) das tabelas no esquema `dev.iops_rj`.")
+    st.write("Visualize os metadados e a distribuição estatística dos dados (Data Profiling) das tabelas configuradas no seu Genie Space.")
     
     if not config.get("host") or not config.get("token") or not config.get("space_id"):
         st.caption("Preencha as credenciais na barra lateral para usar a ferramenta.")
@@ -1913,41 +2011,27 @@ def render_data_dictionary_and_profiling(config: Dict[str, Any]) -> None:
 
     client = GenieApiClient(config["host"], config["token"], config["space_id"])
     
-    if "dev_iops_rj_tables" not in st.session_state:
-        with st.spinner("Carregando lista de tabelas de dev.iops_rj..."):
-            try:
-                space_payload = client.get_space()
-                warehouse_id = space_payload.get("warehouse_id")
-                
-                show_payload = client.execute_sql_statement(
-                    warehouse_id=warehouse_id,
-                    statement="SHOW TABLES IN dev.iops_rj",
-                    timeout_seconds=config.get("timeout_seconds", 60)
-                )
-                
-                rows = show_payload.get("result", {}).get("data_array", [])
-                cols = show_payload.get("manifest", {}).get("schema", {}).get("columns", [])
-                col_names = [c.get("name", "") for c in cols]
-                
-                table_names = []
-                if rows and col_names:
-                    df_tables = pd.DataFrame(rows, columns=col_names)
-                    if "tableName" in df_tables.columns:
-                        table_names = df_tables["tableName"].tolist()
-                    else:
-                        table_names = [row[1] if len(row) > 1 else row[0] for row in rows]
-                
-                st.session_state["dev_iops_rj_tables"] = sorted(table_names)
-            except Exception as e:
-                st.error(f"Não foi possível carregar a lista de tabelas: {e}")
-                st.session_state["dev_iops_rj_tables"] = []
+    # Use tables from the Genie Space configuration
+    tables_df, _, _ = get_cached_genie_space_tables(config["host"], config["token"], config["space_id"])
+    table_options = []
+    if not tables_df.empty:
+        for _, row in tables_df.iterrows():
+            cat = row.get("table_catalog", "")
+            sch = row.get("table_schema", "")
+            nam = row.get("table_name", "")
+            if cat and sch:
+                table_options.append(f"{cat}.{sch}.{nam}")
+            elif sch:
+                table_options.append(f"{sch}.{nam}")
+            else:
+                table_options.append(nam)
+    table_options = sorted(table_options)
 
-    table_options = st.session_state.get("dev_iops_rj_tables", [])
-    
     col1, col2 = st.columns([3, 1])
     with col1:
-        selected_table = st.selectbox("Selecione a Tabela em dev.iops_rj", [""] + table_options)
-        final_table = f"dev.iops_rj.{selected_table}" if selected_table else ""
+        selected_table = st.selectbox("Selecione a Tabela do Space", [""] + table_options)
+        final_table = selected_table
+
         
     with col2:
         st.write("")
@@ -2183,8 +2267,306 @@ def render_environment_comparator(config: Dict[str, Any]) -> None:
                 else:
                     st.error(f"Erro durante a comparação: {e}")
 
+def render_create_genie_space(config: Dict[str, Any]) -> None:
+    log_usage("Create Genie Space")
+    st.header("🏗️ Criar Novo Genie Space (via API)")
+    st.write("Utilize esta ferramenta para provisionar um novo espaço do Genie programaticamente.")
+    
+    if not config.get("host") or not config.get("token"):
+        st.warning("Preencha o HOST e o TOKEN na barra lateral para habilitar a criação via API.")
+        return
+
+    # Basic Info
+    st.subheader("1. Informações Básicas")
+    col1, col2 = st.columns(2)
+    with col1:
+        title = st.text_input("Título do Space", placeholder="Ex: Analítico Financeiro RJZ")
+    with col2:
+        # Try to get warehouse_id from current space to use as default
+        default_wh = ""
+        if config.get("host") and config.get("token") and config.get("space_id"):
+            try:
+                client_temp = GenieApiClient(config["host"], config["token"], config["space_id"])
+                space_info = client_temp.get_space()
+                default_wh = space_info.get("warehouse_id", "")
+            except:
+                pass
+        
+        warehouse_id = st.text_input(
+            "SQL Warehouse ID", 
+            value=default_wh, 
+            placeholder="Ex: ab0de84dfac97072",
+            type="password",
+            help="O ID ou Path do Warehouse. Use o ícone de olho para conferir o valor."
+        )
+
+    description = st.text_area("Descrição (Opcional)", placeholder="Descreva o propósito deste espaço...")
+
+    st.divider()
+    
+    # Table Selection
+    st.subheader("2. Seleção de Tabelas")
+    st.info("Navegue pelo Unity Catalog para selecionar as tabelas que farão parte do contexto deste espaço.")
+    
+    # Extract ID for discovery calls
+    active_warehouse_id = extract_warehouse_id(warehouse_id)
+
+    if active_warehouse_id:
+        browse_col1, browse_col2, browse_col3 = st.columns(3)
+        
+        catalogs = get_cached_catalogs(config["host"], config["token"], active_warehouse_id)
+        with browse_col1:
+            selected_catalog = st.selectbox("Catálogo", [""] + catalogs)
+        
+        schemas = []
+        if selected_catalog:
+            schemas = get_cached_schemas(config["host"], config["token"], active_warehouse_id, selected_catalog)
+        with browse_col2:
+            selected_schema = st.selectbox("Esquema", [""] + schemas)
+            
+        tables = []
+        if selected_schema:
+            tables = get_cached_tables(config["host"], config["token"], active_warehouse_id, selected_catalog, selected_schema)
+        with browse_col3:
+            selected_tables_in_browse = st.multiselect("Tabelas", tables)
+            
+        if st.button("Adicionar tabelas selecionadas"):
+            for t in selected_tables_in_browse:
+                full_name = f"{selected_catalog}.{selected_schema}.{t}"
+                if full_name not in st.session_state.create_space_selected_tables:
+                    st.session_state.create_space_selected_tables.append(full_name)
+            st.success(f"{len(selected_tables_in_browse)} tabela(s) adicionada(s) à lista.")
+    else:
+        st.caption("Informe o SQL Warehouse ID para habilitar a navegação de tabelas.")
+
+    if st.session_state.create_space_selected_tables:
+        st.markdown("**Tabelas Selecionadas para o Space:**")
+        # Display selected tables in a more compact way
+        for i, t in enumerate(st.session_state.create_space_selected_tables):
+            c_col1, c_col2 = st.columns([5, 1])
+            c_col1.code(t)
+            if c_col2.button("Remover", key=f"remove_t_{i}"):
+                st.session_state.create_space_selected_tables.pop(i)
+                st.rerun()
+                
+        if st.button("Limpar todas as tabelas"):
+            st.session_state.create_space_selected_tables = []
+            st.rerun()
+
+    st.divider()
+    
+    # Advanced / Create
+    st.subheader("3. Finalização")
+    
+    # Build JSON automatically based on selected tables
+    auto_json = {
+        "version": 2,
+        "data_sources": {
+            "tables": [{"identifier": t} for t in st.session_state.create_space_selected_tables]
+        }
+    }
+    
+    with st.expander("Configurações Avançadas (JSON Serialized Space)"):
+        st.markdown("""
+        **O que é este campo?**  
+        O `serialized_space` é a 'alma' do Genie. Ele define não apenas as tabelas, mas também instruções personalizadas, 
+        exemplos de perguntas (few-shot) e métricas.
+        
+        **É necessário?**  
+        Sim, para que o espaço tenha contexto. No entanto, este campo é **preenchido automaticamente** conforme você 
+        seleciona as tabelas acima. Você só precisa editá-lo se quiser adicionar configurações manuais complexas.
+        """)
+        serialized_space_val = st.text_area("JSON Payload", value=json.dumps(auto_json, indent=2), height=250)
+
+    if st.button("Criar Space", type="primary", use_container_width=True):
+        final_warehouse_id = extract_warehouse_id(warehouse_id)
+        if not title or not final_warehouse_id:
+            st.error("Título e Warehouse ID são obrigatórios.")
+        else:
+            client = GenieApiClient(config["host"], config["token"], "new")
+            with st.spinner("Provisionando novo Genie Space..."):
+                try:
+                    # Use the value from text area in case user made manual edits
+                    final_serialized = serialized_space_val if serialized_space_val.strip() else json.dumps(auto_json)
+                    
+                    response = client.create_space(
+                        title=title,
+                        warehouse_id=final_warehouse_id,
+                        description=description if description else None,
+                        serialized_space=final_serialized
+                    )
+
+
+                    
+                    new_space_id = response.get("space_id") or response.get("id")
+                    st.success(f"### Sucesso! 🎉")
+                    st.write(f"O Genie Space foi criado com o ID: `{new_space_id}`")
+                    st.json(response)
+                    
+                    st.info("O novo espaço já está disponível para seleção no **Genie Chat**.")
+                    
+                    # Clear cache to ensure the new space shows up in the dropdown
+                    get_cached_spaces.clear()
+                    
+                    # Automatically select the new space
+                    st.session_state.chat_selected_space_id = new_space_id
+                    
+                    # Clear selection on success
+                    st.session_state.create_space_selected_tables = []
+
+                    
+                except Exception as e:
+                    st.error(f"Erro ao criar Genie Space: {e}")
+
+
+def render_jinja_model_generator(config: Dict[str, Any]) -> None:
+    log_usage("Jinja Model Generator")
+    st.header("🛠️ Gerador de Modelos dbt/Jinja")
+    st.write("Transforme queries SQL em modelos dbt (Jinja) formatados e visualize a linhagem das tabelas envolvidas.")
+    
+    if not config.get("host") or not config.get("token") or not config.get("space_id"):
+        st.warning("Preencha as credenciais na barra lateral para usar esta ferramenta.")
+        return
+
+    # 1. Input SQL
+    st.subheader("1. Query de Origem")
+    sql_input = st.text_area(
+        "Cole sua Query SQL aqui", 
+        height=250, 
+        placeholder="SELECT * FROM dev.iops_rj.vendas WHERE ..."
+    )
+    
+    # 2. Configurações do dbt
+    st.subheader("2. Configuração do Modelo")
+    
+    # Tenta sugerir um alias se a query tiver uma tabela clara
+    suggested_alias = ""
+    if sql_input:
+        match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", sql_input, re.IGNORECASE)
+        if match:
+            suggested_alias = match.group(1).split(".")[-1]
+    
+    dbt_alias = st.text_input("Alias do Modelo", value=suggested_alias, placeholder="Ex: dynamics_13_corretores")
+    
+    # Hardcoded values per user request
+    dbt_schema = "iops_rj"
+    dbt_materialized = "table"
+    on_table_exists = "replace"
+    
+    st.caption(f"Configurações fixas: Schema: `{dbt_schema}` | Materialização: `{dbt_materialized}` | On Table Exists: `{on_table_exists}`")
+    st.divider()
+
+    if st.button("🚀 Gerar Modelo dbt", type="primary", use_container_width=True):
+        if not sql_input:
+            st.error("Por favor, insira a query SQL.")
+            return
+            
+        with st.spinner("Gerando modelo dbt..."):
+            # 1. Bloco de Configuração (Sempre correto)
+            config_block = f"""{{{{ config(
+    schema='{dbt_schema}',
+    alias='{dbt_alias if dbt_alias else "nome_da_tabela"}',
+    materialized='{dbt_materialized}',
+    on_table_exists='{on_table_exists}',
+) 
+}}}}"""
+            
+            # 2. Transformação de Linhagem via Python (Infalível)
+            processed_sql = sql_input
+            
+            # Função auxiliar para limpar nomes de tabelas (remover crases/aspas)
+            def clean_name(n):
+                return n.replace('`','').replace('"','').replace("'","")
+            
+            # Regra para 'semantic' -> ref()
+            # Padrão flexível para suportar: `catalogo`.`semantic`.`tabela`, semantic.tabela, "semantic"."tabela", etc.
+            semantic_pattern = r"(?:[`'\"a-zA-Z0-9_ ]+\.)?[`'\" ]*semantic[`'\" ]*\.([`'\"a-zA-Z0-9_ ]+)"
+            processed_sql = re.sub(
+                semantic_pattern, 
+                lambda m: f"{{{{ ref('{clean_name(m.group(1))}') }}}}", 
+                processed_sql, 
+                flags=re.IGNORECASE
+            )
+            
+            # Regra para 'clean' -> source()
+            clean_pattern = r"(?:[`'\"a-zA-Z0-9_ ]+\.)?[`'\" ]*clean[`'\" ]*\.([`'\"a-zA-Z0-9_ ]+)"
+            processed_sql = re.sub(
+                clean_pattern, 
+                lambda m: f"{{{{ source('clean', '{clean_name(m.group(1))}') }}}}", 
+                processed_sql, 
+                flags=re.IGNORECASE
+            )
+
+
+            
+            # Montagem Final
+            full_model = f"{config_block}\n\n{processed_sql}"
+            
+            st.subheader("✨ Modelo dbt Gerado")
+            st.code(full_model, language="sql")
+            
+            # Download
+            st.download_button(
+                "Download Modelo (.sql)",
+                data=full_model,
+                file_name=f"{dbt_alias if dbt_alias else 'modelo'}.sql",
+                mime="text/x-sql"
+            )
+
+
+
+
+
 def run_genie_chat_mode(config: Dict[str, Any], ui_mode: str) -> None:
     log_usage("Genie Chat", details=f"Mode: {ui_mode}")
+
+    # 1. Space Selection at the top of Chat
+    st.markdown("### 🪐 Seleção do Espaço de Trabalho")
+    host = config.get("host")
+    token = config.get("token")
+    
+    if host and token:
+        try:
+            spaces = get_cached_spaces(host, token)
+            if spaces:
+                # Robustly build space options handling different possible keys
+                space_options = {}
+                for s in spaces:
+                    sid = s.get("space_id") or s.get("id")
+                    name = s.get("title") or s.get("name") or s.get("display_name") or sid or "Espaço Sem Nome"
+                    if sid:
+                        space_options[sid] = name
+
+                
+                # Determine default selection
+                current_space_id = st.session_state.get("chat_selected_space_id") or os.getenv("GENIE_SPACE_ID")
+                space_ids = list(space_options.keys())
+
+                
+                default_idx = 0
+                if current_space_id in space_ids:
+                    default_idx = space_ids.index(current_space_id)
+
+                selected_space_id = st.selectbox(
+                    "Genie Space Ativo",
+                    options=space_ids,
+                    index=default_idx,
+                    format_func=lambda x: str(space_options.get(x, x)),
+                    key="chat_selected_space_id",
+                    help="Selecione o espaço que deseja utilizar para as consultas."
+                )
+                # Ensure config uses the newly selected space
+                config["space_id"] = selected_space_id
+            else:
+                st.warning("Nenhum Genie Space encontrado. Verifique suas permissões ou crie um novo espaço.")
+        except Exception as e:
+            st.error(f"Erro ao listar Genie Spaces: {e}")
+    else:
+        st.info("Preencha o HOST e TOKEN na barra lateral para selecionar um Genie Space.")
+
+
+    st.divider()
+
     render_genie_space_tables(config)
     render_table_lineage_section(config)
     render_messages(ui_mode)
@@ -2274,14 +2656,21 @@ def main() -> None:
     render_top_branding()
     ui_mode = render_interface_mode_top()
 
-    if app_mode == "💬 Genie Chat":
+    if app_mode == "🏗️ Criar Novo Genie Space (API)":
+        render_create_genie_space(config)
+    elif app_mode == "💬 Genie Chat":
         run_genie_chat_mode(config, ui_mode)
+    elif app_mode == "🛠️ Gerador de Modelos dbt/Jinja":
+        render_jinja_model_generator(config)
     elif app_mode == "📚 Dicionário e Perfil de Dados (Profiling)":
         render_data_dictionary_and_profiling(config)
     elif app_mode == "⚡ Otimizador e Revisor SQL (Linter)":
         render_sql_optimizer(config)
     elif app_mode == "⚖️ Comparador de Ambientes (Dev vs Prod)":
         render_environment_comparator(config)
+
+
+
 
 
 if __name__ == "__main__":
