@@ -33,6 +33,9 @@ O **Genie RJZ Cyrela** é um portal de desenvolvimento que centraliza ferramenta
 - Revisar e otimizar queries SQL com sugestões inteligentes.
 - Comparar esquemas entre ambientes (Dev vs Prod).
 - Visualizar linhagem de dados com grafos interativos.
+- **Automatizar o deploy de modelos dbt com abertura automática de Pull Requests no Azure DevOps.**
+- **Analisar o impacto de mudanças de query em dashboards de BI.**
+- **Provisionar novos Genie Spaces programaticamente via API.**
 
 ---
 
@@ -84,6 +87,37 @@ Informe duas tabelas (ex: `dev.iops_rj.tabela` e `prd.iops_rj.tabela`) e obtenha
 | ⚠️ Tipo Divergente | Coluna existe em ambos, mas com tipos diferentes |
 | 🛑 Falta no DEV | Coluna existe somente na PROD |
 | 🛑 Falta no PROD | Coluna existe somente no DEV |
+
+---
+
+### 🛡️ Analisador de Impacto em BI
+
+Evite quebras em dashboards de Power BI antes de realizar o deploy. Esta ferramenta compara a query atual com a proposta e identifica:
+- **Remoção de colunas** (Risco Crítico).
+- **Renomeação de campos** (Risco Crítico).
+- **Mudança de tipos de dados** (Risco de Alerta).
+- **Adição de campos** (Risco Seguro).
+
+Retorna um status visual (`CRÍTICO`, `ALERTA` ou `SEGURO`) para apoiar a decisão do Engenheiro de Dados.
+
+---
+
+### 🚀 DevOps & CI/CD Hub (Auto-PR)
+
+Integração direta com o **Azure DevOps** para automatizar o ciclo de vida do dbt.
+- **Git CLI Workflow**: Realiza um clone completo da branch `dev` para garantir integridade.
+- **Auto-Commit**: Salva o arquivo `.sql` (Jinja) e `.yml` (Doc) nas pastas corretas (`dbt/models/` e `dbt/models/*/docs/`).
+- **Auto-PR**: Abre automaticamente um Pull Request apontado para `dev` ou `main` com um clique.
+- **Status em Tempo Real**: Visualize o último commit e autor da branch alvo antes de enviar.
+
+---
+
+### 🏗️ Criar Novo Genie Space (API)
+
+Ferramenta administrativa para criar novos espaços do Genie sem sair do portal.
+- Navegação via Unity Catalog para seleção de tabelas.
+- Geração automática do `serialized_space` JSON.
+- Ordenação automática de identificadores de tabelas (Requisito da API Databricks).
 
 ---
 
@@ -156,12 +190,18 @@ cp .env.example .env
 Edite o arquivo `.env` com suas credenciais:
 
 ```env
-# ─── Obrigatórios ───────────────────────────────
+# ─── Obrigatórios (Databricks) ──────────────────
 DATABRICKS_HOST=https://adb-xxxxxxxxxxxxxxxx.x.azuredatabricks.net
 DATABRICKS_TOKEN=seu_token_aqui
 GENIE_SPACE_ID=uuid-do-seu-genie-space
 
-# ─── Opcionais ──────────────────────────────────
+# ─── DevOps (Opcional) ──────────────────────────
+ADO_PAT=seu_pat_do_devops_aqui
+ADO_ORG=cyrela-data-analytics
+ADO_PROJECT=Data Analytics
+ADO_REPO=lakehouse
+
+# ─── Configurações do App ───────────────────────
 GENIE_POLL_SECONDS=2          # Intervalo de polling (default: 2s)
 GENIE_TIMEOUT_SECONDS=600     # Timeout por pergunta (default: 600s)
 ```
