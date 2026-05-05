@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import requests
+import subprocess
+import shutil
 from dotenv import load_dotenv
 from pandas.api import types as ptypes
 
@@ -32,6 +35,188 @@ from genie_chat import (
     extract_message_id,
     wait_for_terminal_message,
 )
+
+class AzureDevOpsClient:
+    def __init__(self, organization: str, project: str, repository: str, pat: str):
+        self.organization = organization
+        self.project = project
+        self.repository = repository
+        self.pat = pat
+        self.rest_url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repository}"
+        self.auth = ("", pat)
+
+    def get_branch(self, branch_name: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.rest_url}/refs?filter=heads/{branch_name}&api-version=7.1"
+        try:
+            response = requests.get(url, auth=self.auth)
+            if response.status_code == 200:
+                value = response.json().get("value", [])
+                return value[0] if value else None
+        except Exception:
+            return None
+        return None
+
+    def get_last_commit(self, branch_name: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.rest_url}/commits?searchCriteria.itemVersion.version={branch_name}&top=1&api-version=7.1"
+        try:
+            response = requests.get(url, auth=self.auth)
+            if response.status_code == 200:
+                value = response.json().get("value", [])
+                return value[0] if value else None
+        except Exception:
+            return None
+        return None
+
+    def create_branch_if_not_exists(self, branch_name: str, base_oid: str) -> str:
+        # Verifica se a branch ja existe
+        existing = self.get_branch(branch_name)
+        if existing:
+            return existing["objectId"]
+        
+        # Se nao existe, cria apontando para o base_oid
+        url = f"{self.rest_url}/refs?api-version=7.1"
+        payload = [
+            {
+                "name": f"refs/heads/{branch_name}",
+                "oldObjectId": "0000000000000000000000000000000000000000",
+                "newObjectId": base_oid
+            }
+        ]
+        response = requests.post(url, auth=self.auth, json=payload)
+        if response.status_code not in [200, 201]:
+            raise RuntimeError(f"Falha ao criar branch: {response.text}")
+        return base_oid
+
+    def get_item_exists(self, path: str, branch_name: str) -> bool:
+        url = f"{self.rest_url}/items?path={path}&versionDescriptor.version={branch_name}&api-version=7.1"
+        try:
+            response = requests.head(url, auth=self.auth)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def push_changes(self, branch_name: str, base_branch: str, changes: List[Dict[str, Any]], comment: str) -> Dict[str, Any]:
+        # 1. Pegar o commit mais recente da branch base (ex: dev)
+        base_ref = self.get_branch(base_branch)
+        if not base_ref:
+            raise ValueError(f"Branch base '{base_branch}' nao encontrada.")
+        
+        # 2. Garantir que a branch de destino existe e herda o historico da base
+        current_oid = self.create_branch_if_not_exists(branch_name, base_ref["objectId"])
+
+        # 3. Ajustar changeType (add vs edit) para cada arquivo
+        for change in changes:
+            path = change["item"]["path"]
+            if self.get_item_exists(path, branch_name):
+                change["changeType"] = "edit"
+            else:
+                change["changeType"] = "add"
+
+        # 4. Realizar o push (commit) relativo ao ID atual da branch
+        payload = {
+            "refUpdates": [
+                {
+                    "name": f"refs/heads/{branch_name}",
+                    "oldObjectId": current_oid
+                }
+            ],
+            "commits": [
+                {
+                    "comment": comment,
+                    "baseCommitId": current_oid, # ESSENCIAL: Mantem o historico e evita "deletar" o resto
+                    "changes": changes
+                }
+            ]
+        }
+        
+        url = f"{self.rest_url}/pushes?api-version=7.1"
+        response = requests.post(url, auth=self.auth, json=payload)
+        if response.status_code not in [200, 201]:
+            raise RuntimeError(f"Falha no Push: {response.text}")
+        return response.json()
+
+    def create_pull_request(self, source_branch: str, target_branch: str, title: str, description: str) -> Dict[str, Any]:
+        url = f"{self.rest_url}/pullrequests?api-version=7.1"
+        payload = {
+            "sourceRefName": f"refs/heads/{source_branch}",
+            "targetRefName": f"refs/heads/{target_branch}",
+            "title": title,
+            "description": description
+        }
+        response = requests.post(url, auth=self.auth, json=payload)
+        if response.status_code not in [200, 201]:
+            raise RuntimeError(f"Falha ao abrir PR: {response.text}")
+        return response.json()
+
+    def push_changes_git_cli(self, branch_name: str, base_branch: str, sql_path: str, sql_content: str, yml_path: str, yml_content: str, comment: str):
+        """
+        Realiza o push usando o Git CLI para garantir que apenas os arquivos alvo sejam modificados,
+        preservando o restante do repositório. Usa um clone completo para evitar problemas de merge/histórico.
+        """
+        import tempfile
+        from pathlib import Path
+        
+        # 1. Preparar diretório temporário
+        temp_dir = Path(tempfile.gettempdir()) / f"genie_git_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True)
+        
+        try:
+            # 2. URL com Autenticação (PAT)
+            encoded_pat = requests.utils.quote(self.pat)
+            repo_url = f"https://{encoded_pat}@dev.azure.com/{self.organization}/{requests.utils.quote(self.project)}/_git/{self.repository}"
+            
+            def run_git(args, cwd=temp_dir):
+                result = subprocess.run(
+                    ["git"] + args,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Erro no Git ({args[0]}): {result.stderr}")
+                return result.stdout
+
+            # 3. Clone completo da branch específica
+            run_git(["clone", "--single-branch", "--branch", base_branch, repo_url, "."])
+            
+            # 4. Configurar usuário (obrigatório para commit)
+            run_git(["config", "user.email", "genie-bot@cyrela.com.br"])
+            run_git(["config", "user.name", "Genie Bot"])
+            
+            # 5. Criar e mudar para a nova branch
+            run_git(["checkout", "-b", branch_name])
+            
+            # 6. Gravar arquivos nos caminhos corretos
+            full_sql_path = temp_dir / sql_path
+            full_yml_path = temp_dir / yml_path
+            
+            full_sql_path.parent.mkdir(parents=True, exist_ok=True)
+            full_yml_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with full_sql_path.open("w", encoding="utf-8") as f:
+                f.write(sql_content)
+            
+            if yml_content.strip():
+                with full_yml_path.open("w", encoding="utf-8") as f:
+                    f.write(yml_content)
+            
+            # 7. Sincronizar TODAS as mudanças (add --all garante que nada suma)
+            run_git(["add", "--all"])
+            
+            # 8. Commit
+            run_git(["commit", "-m", comment])
+            
+            # 9. Push (Force push para sobrescrever tentativas anteriores se houver)
+            run_git(["push", "origin", branch_name, "--force"])
+            
+            return True
+        finally:
+            # Limpeza
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
 import plotly.graph_objects as go
 
@@ -1115,10 +1300,18 @@ def collect_text_answer(message: Dict[str, Any]) -> str:
         if not isinstance(attachment, dict):
             continue
 
+        # Ignorar blocos de sugestões que o Genie as vezes coloca como texto
+        if "suggested_questions" in attachment:
+            continue
+
         text_block = attachment.get("text") or {}
         content = text_block.get("content")
         if content:
-            text_parts.append(str(content))
+            content_str = str(content).strip()
+            # Filtro para evitar que perguntas automáticas do Genie poluam a resposta
+            if content_str.startswith(("Você gostaria", "Deseja ver", "Quer saber", "Como prefere", "Pode também", "Se preferir")):
+                continue
+            text_parts.append(content_str)
 
     if text_parts:
         return "\n\n".join(text_parts)
@@ -1399,9 +1592,14 @@ def render_sidebar() -> Dict[str, Any]:
                 "🏗️ Criar Novo Genie Space (API)",
                 "💬 Genie Chat", 
                 "🛠️ Gerador de Modelos dbt/Jinja",
+                "📄 Gerador de Documentação (.yml)",
+                "🔍 Mapeador de Colunas (Legacy -> Atual)",
+                "🏹 Conversor CRM XML -> SQL",
                 "📚 Dicionário e Perfil de Dados (Profiling)", 
                 "⚡ Otimizador e Revisor SQL (Linter)",
-                "⚖️ Comparador de Ambientes (Dev vs Prod)"
+                "⚖️ Comparador de Ambientes (Dev vs Prod)",
+                "🛡️ Analisador de Impacto em BI",
+                "🚀 DevOps & CI/CD Hub (Auto-PR)"
             ]
 
         )
@@ -1456,6 +1654,13 @@ def render_sidebar() -> Dict[str, Any]:
             ),
         )
 
+        st.divider()
+        st.header("Azure DevOps Integration")
+        devops_pat = st.text_input("ADO_PAT (Personal Access Token)", value="9P6J0J0OYhdykTgrEh7WQMfrNIMy8fC4bJI7SNJsBOAP5TnRHIFrJQQJ99CEACAAAAAyghytAAASAZDO1ETp", type="password", key="config_devops_pat")
+        devops_org = st.text_input("ADO_ORG", value="cyrela-data-analytics", key="config_devops_org")
+        devops_proj = st.text_input("ADO_PROJECT", value="Data Analytics", key="config_devops_proj")
+        devops_repo = st.text_input("ADO_REPO", value="lakehouse", key="config_devops_repo")
+
         avatar_source = ASSETS_DIR / AGENT_SOURCE_IMAGE_NAME
         if not avatar_source.exists():
             st.caption(
@@ -1470,6 +1675,12 @@ def render_sidebar() -> Dict[str, Any]:
         "poll_seconds": float(poll_seconds),
         "timeout_seconds": int(timeout_seconds),
         "advanced_mode": bool(advanced_mode),
+        "devops": {
+            "pat": devops_pat,
+            "org": devops_org,
+            "proj": devops_proj,
+            "repo": devops_repo
+        }
     }
 
 
@@ -2127,7 +2338,7 @@ def render_data_dictionary_and_profiling(config: Dict[str, Any]) -> None:
 def render_sql_optimizer(config: Dict[str, Any]) -> None:
     log_usage("SQL Optimizer")
     st.header("⚡ Otimizador e Revisor SQL (Linter)")
-    st.write("Cole sua query abaixo para receber análises de performance, dicas de otimização e revisão automática de boas práticas de código (SQL Linter) no Databricks.")
+    st.write("Receba a versão otimizada da sua query com foco em redução de custo (DBUs) e organização técnica.")
     
     if not config.get("host") or not config.get("token") or not config.get("space_id"):
         st.caption("Preencha as credenciais na barra lateral para usar a ferramenta.")
@@ -2135,24 +2346,28 @@ def render_sql_optimizer(config: Dict[str, Any]) -> None:
 
     query_input = st.text_area("Insira a Query SQL", height=250)
     
-    if st.button("Analisar e Otimizar Query", type="primary"):
+    if st.button("Otimizar e Organizar Query", type="primary"):
         if not query_input.strip():
             st.error("Informe a query.")
             return
             
         prompt = (
-            f"Atue como um Engenheiro de Dados Especialista em Databricks. "
-            f"Analise a seguinte query SQL e forneça um relatório técnico contendo:\n"
-            f"1. Resumo do que a query faz.\n"
-            f"2. Sugestões de Otimização de Performance (ex: particionamento, Z-Order, hints de join, evitar cross joins).\n"
-            f"3. Dicas de legibilidade e boas práticas.\n"
-            f"4. A query refatorada e otimizada (se aplicável).\n\n"
-            f"Query:\n```sql\n{query_input}\n```"
+            f"Otimize a query SQL abaixo para Databricks (custo de DBUs e performance).\n\n"
+            f"Sua resposta deve seguir EXATAMENTE este formato (não escreva NADA antes ou depois):\n\n"
+            f"[LISTA_DE_MELHORIAS]\n"
+            f"(Descreva aqui detalhadamente as melhorias técnicas realizadas)\n\n"
+            f"[QUERY_OTIMIZADA]\n"
+            f"(Forneça aqui a query COMPLETA, bem identada e mantendo o bloco config() original)\n\n"
+            f"REGRAS CRÍTICAS:\n"
+            f"- NÃO repita o prompt, as instruções ou a query de entrada.\n"
+            f"- Comece a resposta DIRETAMENTE pelo marcador [LISTA_DE_MELHORIAS].\n"
+            f"- MANTENHA toda a lógica original (JOINS, CTEs, Filtros).\n\n"
+            f"QUERY:\n"
+            f"```sql\n{query_input}\n```"
         )
         
         client = GenieApiClient(config["host"], config["token"], config["space_id"])
-        
-        with st.spinner("O Genie está analisando sua query. Isso pode levar alguns segundos..."):
+        with st.spinner("Otimizando sua query..."):
             try:
                 start_response = client.start_conversation(prompt)
                 conversation_id = extract_conversation_id(start_response.get("conversation", {}))
@@ -2167,15 +2382,291 @@ def render_sql_optimizer(config: Dict[str, Any]) -> None:
                 )
                 
                 raw_text = collect_text_answer(final_message)
-                
-                # strip <analytics> if it exists
                 clean_text = raw_text.split("<analytics>")[0].strip()
                 
-                st.markdown("### Análise e Sugestões")
-                st.markdown(clean_text)
+                # 1. Limpeza Radical: Cortar tudo antes do primeiro marcador real
+                if "[LISTA_DE_MELHORIAS]" in clean_text:
+                    clean_text = clean_text[clean_text.find("[LISTA_DE_MELHORIAS]"):]
+                
+                # 2. Parsing das seções
+                adjustments_part = ""
+                attachment_sql = ""
+                
+                if "[QUERY_OTIMIZADA]" in clean_text:
+                    parts = clean_text.split("[QUERY_OTIMIZADA]")
+                    adjustments_part = parts[0].replace("[LISTA_DE_MELHORIAS]", "").strip()
+                    sql_text_raw = parts[1].strip()
+                    
+                    # Tentar extrair bloco SQL
+                    sql_blocks = re.findall(r"```sql\s*\n(.*?)\n```", sql_text_raw, re.DOTALL | re.IGNORECASE)
+                    attachment_sql = sql_blocks[-1].strip() if sql_blocks else sql_text_raw.replace("```", "").strip()
+                else:
+                    adjustments_part = clean_text.replace("[LISTA_DE_MELHORIAS]", "").strip()
+
+                # 3. Prioridade para anexo oficial
+                for attachment in final_message.get("attachments") or []:
+                    if isinstance(attachment, dict):
+                        query_block = attachment.get("query") or {}
+                        sql_text = query_block.get("query")
+                        if isinstance(sql_text, str) and len(sql_text) > len(attachment_sql):
+                            attachment_sql = sql_text
+                            break
+                
+                # 4. Preservar config()
+                config_match = re.search(r"\{\{\s*config\(.*?\)\s*\}\}", query_input, flags=re.DOTALL | re.IGNORECASE)
+                if config_match and attachment_sql and not re.search(r"\{\{\s*config\(.*?\)\s*\}\}", attachment_sql, flags=re.DOTALL | re.IGNORECASE):
+                    attachment_sql = config_match.group(0) + "\n\n" + attachment_sql
+
+                # 5. Normalizar quebras de linha e identação
+                if attachment_sql:
+                    attachment_sql = attachment_sql.replace("\\n", "\n").replace("\\t", "    ")
+                    if "\n" not in attachment_sql and "SELECT " in attachment_sql:
+                        # Forçar quebras se vier em uma linha só
+                        for kw in ["SELECT ", "FROM ", "LEFT JOIN ", "INNER JOIN ", "WHERE ", "WITH ", "GROUP BY ", "ORDER BY "]:
+                            attachment_sql = attachment_sql.replace(kw, f"\n{kw}")
+
+                # 6. Exibição Final
+                if attachment_sql:
+                    st.markdown("### 🚀 Query Otimizada")
+                    st.code(attachment_sql, language="sql")
+
+                if adjustments_part:
+                    # Limpar placeholders e resquícios do prompt
+                    clean_adj = adjustments_part.replace("(Descreva aqui detalhadamente as melhorias técnicas realizadas)", "").strip()
+                    clean_adj = clean_adj.split("QUERY:")[0].strip()
+                    
+                    if len(clean_adj) > 5:
+                        st.markdown("### 🛠️ Ajustes Realizados")
+                        st.markdown(clean_adj)
                 
             except Exception as e:
-                st.error(f"Falha ao analisar a query: {e}")
+                st.error(f"Erro ao otimizar query: {e}")
+
+def render_bi_impact_checker(config: Dict[str, Any]) -> None:
+    log_usage("BI Impact Checker")
+    st.header("🛡️ Analisador de Impacto em BI (Breaking Change Detector)")
+    st.write("Compare a query atual com a nova versão para identificar riscos que podem quebrar seus Dashboards (Power BI).")
+    
+    if not config.get("host") or not config.get("token") or not config.get("space_id"):
+        st.caption("Preencha as credenciais na barra lateral para usar a ferramenta.")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        sql_atual = st.text_area("Query ATUAL (em produção)", height=300, help="A query que está rodando hoje.")
+    with col2:
+        sql_proposto = st.text_area("Query PROPOSTA (nova versão)", height=300, help="A versão otimizada ou alterada.")
+
+    if st.button("Analisar Impacto", type="primary"):
+        if not sql_atual.strip() or not sql_proposto.strip():
+            st.error("Informe ambas as queries para comparação.")
+            return
+
+        prompt = (
+            f"Atue como um Especialista em BI e Engenheiro de Dados. Sua tarefa é identificar possíveis BREAKING CHANGES "
+            f"ao alterar a query SQL abaixo.\n\n"
+            f"Compare a 'QUERY ATUAL' com a 'QUERY PROPOSTA' e gere um relatório técnico seguindo este formato:\n\n"
+            f"[STATUS_DE_RISCO]\n"
+            f"(CRÍTICO, ALERTA ou SEGURO)\n\n"
+            f"[MUDANÇAS_DETECTADAS]\n"
+            f"(Liste colunas removidas, renomeadas ou com alteração de tipo/lógica)\n\n"
+            f"[RECOMENDAÇÃO]\n"
+            f"(O que o desenvolvedor deve fazer para não quebrar o BI)\n\n"
+            f"REGRAS:\n"
+            f"- NÃO escreva nada antes do marcador [STATUS_DE_RISCO].\n"
+            f"- Considere como CRÍTICO qualquer remoção ou renomeação de coluna.\n"
+            f"- Considere como ALERTA mudanças de tipo de dado ou lógica de negócio.\n\n"
+            f"QUERY ATUAL:\n```sql\n{sql_atual}\n```\n\n"
+            f"QUERY PROPOSTA:\n```sql\n{sql_proposto}\n```"
+        )
+
+        client = GenieApiClient(config["host"], config["token"], config["space_id"])
+        with st.spinner("Analisando impacto..."):
+            try:
+                start_response = client.start_conversation(prompt)
+                conversation_id = extract_conversation_id(start_response.get("conversation", {}))
+                message_id = extract_message_id(start_response.get("message", {}))
+                
+                final_message = wait_for_terminal_message(
+                    client=client,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    poll_seconds=config.get("poll_seconds", 2.0),
+                    timeout_seconds=config.get("timeout_seconds", 600),
+                )
+                
+                raw_text = collect_text_answer(final_message)
+                clean_text = raw_text.split("<analytics>")[0].strip()
+
+                if "[STATUS_DE_RISCO]" in clean_text:
+                    clean_text = clean_text[clean_text.find("[STATUS_DE_RISCO]"):]
+
+                # Parsing
+                status = "DESCONHECIDO"
+                mudancas = ""
+                recomendacao = ""
+
+                if "[STATUS_DE_RISCO]" in clean_text:
+                    parts = clean_text.split("[MUDANÇAS_DETECTADAS]")
+                    status_raw = parts[0].replace("[STATUS_DE_RISCO]", "").strip()
+                    status = status_raw.split("\n")[0].strip()
+
+                    if "[RECOMENDAÇÃO]" in parts[1]:
+                        sub_parts = parts[1].split("[RECOMENDAÇÃO]")
+                        mudancas = sub_parts[0].strip()
+                        recomendacao = sub_parts[1].strip()
+                    else:
+                        mudancas = parts[1].strip()
+
+                # Exibição Visual
+                st.divider()
+                if "CRÍTICO" in status.upper():
+                    st.error(f"🔴 STATUS DE RISCO: {status}")
+                elif "ALERTA" in status.upper():
+                    st.warning(f"🟡 STATUS DE RISCO: {status}")
+                else:
+                    st.success(f"🟢 STATUS DE RISCO: {status}")
+
+                col_res1, col_res2 = st.columns(2)
+                with col_res1:
+                    st.subheader("🔍 Mudanças Detectadas")
+                    st.write(mudancas)
+                with col_res2:
+                    st.subheader("💡 Recomendação")
+                    st.write(recomendacao)
+
+            except Exception as e:
+                st.error(f"Erro ao analisar impacto: {e}")
+
+def render_devops_automation(config: Dict[str, Any]) -> None:
+    log_usage("DevOps Automation")
+    st.header("🚀 DevOps & CI/CD Hub (Auto-PR)")
+    st.write("Automatize o envio dos seus modelos dbt e a abertura de Pull Requests no Azure DevOps.")
+    
+    devops_conf = config.get("devops", {})
+    if not devops_conf.get("pat"):
+        st.warning("Configure o seu PAT do Azure DevOps na barra lateral para usar esta ferramenta.")
+        return
+
+    client = AzureDevOpsClient(
+        organization=devops_conf["org"],
+        project=devops_conf["proj"],
+        repository=devops_conf["repo"],
+        pat=devops_conf["pat"]
+    )
+
+    # Painel de Status do Repositório
+    st.subheader("📊 Status do Repositório (Azure DevOps)")
+    target_branch_view = st.selectbox("Verificar Status da Branch:", ["dev", "main"], index=0)
+    last_commit = client.get_last_commit(target_branch_view)
+    
+    if last_commit:
+        with st.container(border=True):
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.markdown(f"**Último Commit em `{target_branch_view}`:**")
+                st.caption(last_commit.get("comment", "Sem comentário"))
+            with col_info2:
+                author = last_commit.get("author", {})
+                st.markdown(f"**Autor:** {author.get('name', 'N/A')}")
+                st.caption(f"📅 {last_commit.get('author', {}).get('date', '')[:19].replace('T', ' ')}")
+    else:
+        st.info("Nao foi possivel carregar o status da branch. Verifique seu PAT e a conexao.")
+
+    st.divider()
+
+    # Tentar recuperar modelos gerados recentemente (se houver)
+    last_sql = st.session_state.get("last_generated_jinja_sql", "")
+    last_yml = st.session_state.get("last_generated_yaml", "")
+    last_name = st.session_state.get("last_generated_model_name", "novo_modelo")
+
+    with st.form("devops_push_form"):
+        st.subheader("Configuração da Alteração")
+        
+        # SQL e YAML primeiro, pois deles derivamos o resto
+        col_sql, col_yml = st.columns(2)
+        with col_sql:
+            sql_content = st.text_area("Conteúdo SQL (Jinja)", value=last_sql, height=350, help="Cole aqui a query com o bloco config().")
+        with col_yml:
+            yml_content = st.text_area("Conteúdo YAML (Schema)", value=last_yml, height=350)
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            base_branch = st.selectbox("Branch Base (Target)", ["dev", "main"], index=0)
+            pr_title = st.text_input("Título do Pull Request", value=f"feat: otimização de modelo dbt")
+        with col2:
+            # Estrutura de nome de branch
+            st.markdown("**Estrutura da Nova Branch**")
+            col_b1, col_b2, col_b3 = st.columns([1, 1, 2])
+            with col_b1:
+                b_user = st.text_input("Usuário", value="mateus_daniel")
+            with col_b2:
+                b_type = st.selectbox("Tipo", ["feature", "hotfix"])
+            with col_b3:
+                b_reason = st.text_input("Motivo (Sufixo)", value="otimizacao")
+        
+        new_branch = f"{b_user}/{b_type}/{b_reason}"
+        pr_desc = st.text_area("Descrição do PR", value="Otimização automática gerada via Genie SQL Linter.", height=80)
+
+        submit = st.form_submit_button("🚀 Publicar no dbt & Abrir PR", use_container_width=True)
+
+    if submit:
+        if not sql_content.strip():
+            st.error("O conteúdo SQL é obrigatório para identificar o modelo.")
+            return
+
+        # 1. Extrair metadados do config()
+        schema_match = re.search(r"schema\s*=\s*['\"]([^'\"]+)['\"]", sql_content, re.IGNORECASE)
+        alias_match = re.search(r"alias\s*=\s*['\"]([^'\"]+)['\"]", sql_content, re.IGNORECASE)
+        
+        target_schema = schema_match.group(1) if schema_match else "default"
+        model_filename = alias_match.group(1) if alias_match else "novo_modelo"
+        
+        target_folder = f"dbt/models/{target_schema}"
+        
+        client = AzureDevOpsClient(
+            organization=devops_conf["org"],
+            project=devops_conf["proj"],
+            repository=devops_conf["repo"],
+            pat=devops_conf["pat"]
+        )
+
+        try:
+            with st.spinner(f"Processando {model_filename} via Git CLI..."):
+                # Caminhos relativos dentro do repo
+                sql_rel_path = f"{target_folder}/{model_filename}.sql"
+                yml_rel_path = f"{target_folder}/docs/{model_filename}.yml"
+                
+                # Executar fluxo Git Real
+                client.push_changes_git_cli(
+                    branch_name=new_branch,
+                    base_branch=base_branch,
+                    sql_path=sql_rel_path,
+                    sql_content=sql_content,
+                    yml_path=yml_rel_path,
+                    yml_content=yml_content,
+                    comment=f"Auto-commit: {model_filename} ({target_schema})"
+                )
+                
+                st.success(f"✅ Commit realizado na branch '{new_branch}'!")
+                
+                # Abrir PR via API
+                pr_response = client.create_pull_request(
+                    source_branch=new_branch,
+                    target_branch=base_branch,
+                    title=f"{pr_title} - {model_filename}",
+                    description=pr_desc
+                )
+                
+                pr_url = pr_response.get("_links", {}).get("html", {}).get("href")
+                st.balloons()
+                st.success(f"🚀 Pull Request aberto com sucesso!")
+                if pr_url:
+                    st.link_button("Visualizar Pull Request no Azure DevOps", pr_url)
+
+        except Exception as e:
+            st.error(f"Erro na integração com DevOps: {e}")
 
 def render_environment_comparator(config: Dict[str, Any]) -> None:
     log_usage("Environment Comparator")
@@ -2386,8 +2877,14 @@ def render_create_genie_space(config: Dict[str, Any]) -> None:
             client = GenieApiClient(config["host"], config["token"], "new")
             with st.spinner("Provisionando novo Genie Space..."):
                 try:
-                    # Use the value from text area in case user made manual edits
-                    final_serialized = serialized_space_val if serialized_space_val.strip() else json.dumps(auto_json)
+                    # Parse and ensure tables are sorted (Databricks requirement)
+                    payload_json = json.loads(serialized_space_val if serialized_space_val.strip() else json.dumps(auto_json))
+                    
+                    if "data_sources" in payload_json and "tables" in payload_json["data_sources"]:
+                        # Sort tables by identifier
+                        payload_json["data_sources"]["tables"].sort(key=lambda x: x.get("identifier", ""))
+                    
+                    final_serialized = json.dumps(payload_json)
                     
                     response = client.create_space(
                         title=title,
@@ -2444,9 +2941,10 @@ def render_jinja_model_generator(config: Dict[str, Any]) -> None:
     if sql_input:
         match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", sql_input, re.IGNORECASE)
         if match:
-            suggested_alias = match.group(1).split(".")[-1]
+            table_name = match.group(1).split(".")[-1]
+            suggested_alias = f"iops_rj.{table_name}"
     
-    dbt_alias = st.text_input("Alias do Modelo", value=suggested_alias, placeholder="Ex: dynamics_13_corretores")
+    dbt_alias = st.text_input("Alias do Modelo", value=suggested_alias, placeholder="Ex: iops_rj.dynamics_13_corretores")
     
     # Hardcoded values per user request
     dbt_schema = "iops_rj"
@@ -2472,7 +2970,8 @@ def render_jinja_model_generator(config: Dict[str, Any]) -> None:
 }}}}"""
             
             # 2. Transformação de Linhagem via Python (Infalível)
-            processed_sql = sql_input
+            # Remove blocos config() existentes se o usuário colou o resultado de volta na área de texto
+            processed_sql = re.sub(r"\{\{\s*config\(.*?\)\s*\}\}", "", sql_input, flags=re.DOTALL | re.IGNORECASE).strip()
             
             # Função auxiliar para limpar nomes de tabelas (remover crases/aspas)
             def clean_name(n):
@@ -2480,16 +2979,16 @@ def render_jinja_model_generator(config: Dict[str, Any]) -> None:
             
             # Regra para 'semantic' -> ref()
             # Padrão flexível para suportar: `catalogo`.`semantic`.`tabela`, semantic.tabela, "semantic"."tabela", etc.
-            semantic_pattern = r"(?:[`'\"a-zA-Z0-9_ ]+\.)?[`'\" ]*semantic[`'\" ]*\.([`'\"a-zA-Z0-9_ ]+)"
+            semantic_pattern = r"(?:[`'\"a-zA-Z0-9_]+\.)?[`'\"]*semantic[`'\"]*\.([`'\"a-zA-Z0-9_]+)"
             processed_sql = re.sub(
                 semantic_pattern, 
-                lambda m: f"{{{{ ref('{clean_name(m.group(1))}') }}}}", 
+                lambda m: f"{{{{ ref('semantic.{clean_name(m.group(1))}') }}}}", 
                 processed_sql, 
                 flags=re.IGNORECASE
             )
             
             # Regra para 'clean' -> source()
-            clean_pattern = r"(?:[`'\"a-zA-Z0-9_ ]+\.)?[`'\" ]*clean[`'\" ]*\.([`'\"a-zA-Z0-9_ ]+)"
+            clean_pattern = r"(?:[`'\"a-zA-Z0-9_]+\.)?[`'\"]*clean[`'\"]*\.([`'\"a-zA-Z0-9_]+)"
             processed_sql = re.sub(
                 clean_pattern, 
                 lambda m: f"{{{{ source('clean', '{clean_name(m.group(1))}') }}}}", 
@@ -2512,6 +3011,280 @@ def render_jinja_model_generator(config: Dict[str, Any]) -> None:
                 file_name=f"{dbt_alias if dbt_alias else 'modelo'}.sql",
                 mime="text/x-sql"
             )
+
+def render_yaml_documentation_generator(config: Dict[str, Any]) -> None:
+    log_usage("YAML Documentation Generator")
+    st.header("📄 Gerador de Documentação (.yml)")
+    st.write("Gere automaticamente o arquivo de documentação dbt (`schema.yml`) baseado na sua query, aproveitando as descrições e metadados já configurados no seu Genie Space.")
+    
+    if not config.get("host") or not config.get("token") or not config.get("space_id"):
+        st.warning("Preencha as credenciais na barra lateral para usar esta ferramenta.")
+        return
+
+    # 1. Input SQL/Jinja
+    st.subheader("1. Query ou Código Jinja")
+    input_code = st.text_area(
+        "Cole sua Query SQL ou Modelo dbt (Jinja) aqui", 
+        height=250, 
+        placeholder="SELECT * FROM {{ ref('semantic.tabela') }} ..."
+    )
+    
+    # 2. Configurações do dbt
+    st.subheader("2. Identificação do Modelo")
+    
+    suggested_name = ""
+    if input_code:
+        # Tenta pegar o nome do modelo se houver um alias no config do jinja
+        match_config = re.search(r"alias=['\"](.*?)['\"]", input_code)
+        if match_config:
+            suggested_name = match_config.group(1)
+        else:
+            # Tenta pegar do FROM se for SQL puro
+            match_from = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", input_code, re.IGNORECASE)
+            if match_from:
+                table_name = match_from.group(1).split(".")[-1]
+                suggested_name = f"iops_rj.{table_name}"
+    
+    model_name = st.text_input("Nome do Modelo (para o YAML)", value=suggested_name, placeholder="Ex: iops_rj.dim_vendas_rj")
+    
+    if st.button("📄 Gerar YAML de Documentação", type="primary", use_container_width=True):
+        if not input_code:
+            st.error("Por favor, insira o código SQL/Jinja.")
+            return
+            
+        client = GenieApiClient(config["host"], config["token"], config["space_id"])
+        
+        with st.spinner("O Genie está analisando as colunas e buscando metadados para o seu YAML..."):
+            try:
+                # Prompt para o Genie gerar o YAML
+                # Pedimos explicitamente para ele usar o contexto do catálogo para as descrições
+                prompt = (
+                    f"Atue como um Engenheiro de Analytics especializado em dbt. "
+                    f"Gere um arquivo YAML de documentação dbt (version: 2) para o modelo '{model_name}'.\n\n"
+                    f"Baseie-se na seguinte query/código para identificar as colunas envolvidas:\n"
+                    f"```sql\n{input_code}\n```\n\n"
+                    f"Instruções Importantes:\n"
+                    f"1. Busque no seu conhecimento do Genie Space (catálogo de dados) as descrições corretas para cada coluna.\n"
+                    f"2. Se não encontrar uma descrição oficial, infira uma descrição clara e amigável em português (PT-BR) baseada no nome da coluna.\n"
+                    f"3. O YAML deve seguir este formato:\n"
+                    f"version: 2\n"
+                    f"models:\n"
+                    f"  - name: {model_name}\n"
+                    f"    description: 'Descricao resumida do modelo'\n"
+                    f"    columns:\n"
+                    f"      - name: coluna_1\n"
+                    f"        description: 'Descricao da coluna 1'\n"
+                    f"4. Retorne APENAS o bloco de código YAML, sem explicações adicionais."
+                )
+                
+                start_response = client.start_conversation(prompt)
+                conversation_id = extract_conversation_id(start_response.get("conversation", {}))
+                message_id = extract_message_id(start_response.get("message", {}))
+                
+                final_message = wait_for_terminal_message(
+                    client=client,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    poll_seconds=config.get("poll_seconds", 2.0),
+                    timeout_seconds=config.get("timeout_seconds", 600),
+                )
+                
+                raw_text = collect_text_answer(final_message)
+                
+                # Extrair apenas o bloco de código YAML da resposta
+                yaml_content = ""
+                code_match = re.search(r"```(?:yaml)?\s*(.*?)\s*```", raw_text, re.DOTALL | re.IGNORECASE)
+                if code_match:
+                    yaml_content = code_match.group(1).strip()
+                else:
+                    # Tenta pegar o texto limpo se não vier com backticks
+                    yaml_content = raw_text.split("<analytics>")[0].strip()
+                
+                if yaml_content:
+                    st.subheader("✨ Arquivo YAML Gerado")
+                    st.code(yaml_content, language="yaml")
+                    
+                    # Botão de Download
+                    st.download_button(
+                        "Download schema.yml",
+                        data=yaml_content,
+                        file_name=f"{model_name}.yml",
+                        mime="text/yaml"
+                    )
+                else:
+                    st.warning("O Genie não retornou um YAML formatado. Tente novamente.")
+                    st.write(raw_text) # Mostra o bruto se falhar o regex
+                
+            except Exception as e:
+                st.error(f"Falha ao gerar documentação: {e}")
+
+def render_column_mapper(config: Dict[str, Any]) -> None:
+    log_usage("Column Mapper")
+    st.header("🔍 Mapeador de Colunas (Legacy -> Atual)")
+    st.write("Compare uma query antiga ou uma lista de colunas legadas com o esquema atual do seu Genie Space para identificar as correspondências corretas.")
+    
+    if not config.get("host") or not config.get("token") or not config.get("space_id"):
+        st.warning("Preencha as credenciais na barra lateral para usar esta ferramenta.")
+        return
+
+    # 1. Input Legacy
+    st.subheader("1. Query ou Colunas Legadas")
+    legacy_input = st.text_area(
+        "Insira a Query Antiga ou a lista de colunas (uma por linha)", 
+        height=250, 
+        placeholder="SELECT cod_cli, nom_cli FROM tabela_antiga ..."
+    )
+    
+    if st.button("🔍 Mapear Colunas Atuais", type="primary", use_container_width=True):
+        if not legacy_input:
+            st.error("Por favor, insira o conteúdo legado.")
+            return
+            
+        client = GenieApiClient(config["host"], config["token"], config["space_id"])
+        
+        with st.spinner("O Genie está analisando o legado e comparando com o catálogo atual..."):
+            try:
+                # 1. Buscar as tabelas configuradas no Space para dar contexto extra ao LLM
+                tables_df, _, _ = get_cached_genie_space_tables(config["host"], config["token"], config["space_id"])
+                space_tables_list = ""
+                if not tables_df.empty:
+                    space_tables_list = "\n".join([
+                        f"- {row['table_catalog']}.{row['table_schema']}.{row['table_name']}" 
+                        for _, row in tables_df.iterrows()
+                    ])
+                
+                # 2. Construir o Prompt enriquecido
+                prompt = (
+                    f"Atue como um Especialista em Migração de Dados de Alta Performance. "
+                    f"Sua missão é mapear colunas de um ambiente Legado para o ambiente Atual no Databricks.\n\n"
+                    f"### CONTEXTO DO GENIE SPACE (Tabelas Principais):\n"
+                    f"{space_tables_list if space_tables_list else 'O Space não possui tabelas listadas ou não foi possível carregar.'}\n\n"
+                    f"### INSTRUÇÃO DE ESCOPO:\n"
+                    f"Considere que o ambiente atual utiliza os esquemas 'semantic', 'clean' e 'iops_rj' (geralmente no catálogo 'dev'). "
+                    f"Mesmo que uma tabela não esteja na lista acima, utilize seu conhecimento do catálogo e das instruções do Space para encontrar a melhor correspondência nestes esquemas.\n\n"
+                    f"### CONTEÚDO LEGADO PARA ANÁLISE:\n"
+                    f"```sql\n{legacy_input}\n```\n\n"
+                    f"### TAREFA:\n"
+                    f"1. Identifique todas as colunas mencionadas no código legado.\n"
+                    f"2. Encontre as colunas equivalentes no banco de dados atual, priorizando as camadas semantic e clean.\n"
+                    f"3. Retorne uma tabela formatada em Markdown com as colunas: 'Coluna Legada', 'Tabela de Referência', 'Coluna Atual Sugerida', 'Confiança' e 'Motivo/Explicação'.\n"
+                    f"4. Na 'Tabela de Referência', indique o nome completo (catalog.schema.table). Se souber que a coluna vem de uma 'semantic' ou 'clean', use-as como preferência.\n"
+                    f"5. Se uma coluna não tiver correspondente óbvio, sugira a mais próxima ou marque como 'Não encontrada'.\n"
+                    f"6. Se houver mudanças de tipo de dado ou lógica de cálculo (ex: mudança de string para decimal), mencione na explicação."
+                )
+                
+                start_response = client.start_conversation(prompt)
+                conversation_id = extract_conversation_id(start_response.get("conversation", {}))
+                message_id = extract_message_id(start_response.get("message", {}))
+                
+                final_message = wait_for_terminal_message(
+                    client=client,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    poll_seconds=config.get("poll_seconds", 2.0),
+                    timeout_seconds=config.get("timeout_seconds", 600),
+                )
+                
+                raw_text = collect_text_answer(final_message)
+                clean_text = raw_text.split("<analytics>")[0].strip()
+                
+                st.markdown("### Resultado do Mapeamento")
+                st.markdown(clean_text)
+                
+            except Exception as e:
+                st.error(f"Falha ao realizar mapeamento: {e}")
+
+def render_crm_xml_converter(config: Dict[str, Any]) -> None:
+    log_usage("CRM XML Converter")
+    st.header("🏹 Conversor CRM XML -> SQL")
+    st.write("Converta um XML de 'Localização Avançada' do CRM em uma query SQL/dbt compatível com o ambiente atual.")
+    
+    if not config.get("host") or not config.get("token") or not config.get("space_id"):
+        st.warning("Preencha as credenciais na barra lateral para usar esta ferramenta.")
+        return
+
+    # 1. Input XML
+    st.subheader("1. XML do CRM")
+    xml_input = st.text_area(
+        "Cole o XML da Localização Avançada aqui", 
+        height=300, 
+        placeholder="<fetch version='1.0' output-format='xml-platform' mapping='logical' ...>"
+    )
+    
+    if st.button("🏹 Gerar Query SQL", type="primary", use_container_width=True):
+        if not xml_input:
+            st.error("Por favor, insira o XML.")
+            return
+            
+        client = GenieApiClient(config["host"], config["token"], config["space_id"])
+        
+        with st.spinner("O Genie está interpretando o XML e mapeando para o catálogo atual..."):
+            try:
+                # Buscar tabelas do space para contexto
+                tables_df, _, _ = get_cached_genie_space_tables(config["host"], config["token"], config["space_id"])
+                space_tables_list = ""
+                if not tables_df.empty:
+                    space_tables_list = "\n".join([
+                        f"- {row['table_catalog']}.{row['table_schema']}.{row['table_name']}" 
+                        for _, row in tables_df.iterrows()
+                    ])
+
+                prompt = (
+                    f"### INSTRUÇÃO CRÍTICA: NÃO EXECUTE NENHUMA QUERY SQL NO BANCO DE DADOS. ###\n"
+                    f"Sua tarefa é estritamente de TRADUÇÃO E DOCUMENTAÇÃO. NÃO BUSQUE DADOS.\n\n"
+                    f"Atue como um Engenheiro de Dados Especialista em CRM e Databricks.\n\n"
+                    f"### TAREFA:\n"
+                    f"Converta o seguinte XML de 'Localização Avançada' do CRM em uma query SQL formatada (Databricks SQL) que represente a mesma lógica.\n\n"
+                    f"### CONTEXTO DO CATÁLOGO ATUAL (Priorize estes nomes):\n"
+                    f"{space_tables_list if space_tables_list else 'O Space não possui tabelas listadas.'}\n\n"
+                    f"### XML DO CRM PARA TRADUZIR:\n"
+                    f"```xml\n{xml_input}\n```\n\n"
+                    f"### REGRAS DE CONVERSÃO:\n"
+                    f"1. Identifique a entidade principal (ex: account, incident) e mapeie para a tabela correspondente em 'semantic' ou 'clean'.\n"
+                    f"2. Mapeie link-entities para JOINs.\n"
+                    f"3. Converta todos os 'attributes' selecionados no XML em colunas no SELECT.\n"
+                    f"4. Converta 'filter' e 'condition' em cláusulas WHERE.\n"
+                    f"5. Se as colunas atuais forem diferentes, sugira o mapeamento mais provável.\n"
+                    f"6. RETORNE APENAS O CÓDIGO SQL dentro de um bloco ```sql ... ``` e uma breve explicação abaixo.\n"
+                    f"7. NÃO MOSTRE RESULTADOS DE DADOS, APENAS O CÓDIGO."
+                )
+                
+                start_response = client.start_conversation(prompt)
+                conversation_id = extract_conversation_id(start_response.get("conversation", {}))
+                message_id = extract_message_id(start_response.get("message", {}))
+                
+                final_message = wait_for_terminal_message(
+                    client=client,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    poll_seconds=config.get("poll_seconds", 2.0),
+                    timeout_seconds=config.get("timeout_seconds", 600),
+                )
+                
+                raw_text = collect_text_answer(final_message)
+                
+                # Buscar SQL nos anexos (O Genie geralmente coloca a query gerada em um bloco de anexo)
+                attachment_sql = ""
+                for attachment in final_message.get("attachments") or []:
+                    if isinstance(attachment, dict):
+                        query_block = attachment.get("query") or {}
+                        sql_text = query_block.get("query")
+                        if isinstance(sql_text, str) and sql_text.strip():
+                            attachment_sql = sql_text
+                            break
+                
+                clean_text = raw_text.split("<analytics>")[0].strip()
+                
+                st.markdown("### Query SQL Gerada")
+                if attachment_sql:
+                    st.code(attachment_sql, language="sql")
+                
+                # Se não houver anexo, mas houver blocos de código no texto, o Streamlit markdown já cuida,
+                # mas exibir o clean_text garante que as explicações apareçam.
+                st.markdown(clean_text)
+                
+            except Exception as e:
+                st.error(f"Falha ao converter XML: {e}")
 
 
 
@@ -2662,12 +3435,22 @@ def main() -> None:
         run_genie_chat_mode(config, ui_mode)
     elif app_mode == "🛠️ Gerador de Modelos dbt/Jinja":
         render_jinja_model_generator(config)
+    elif app_mode == "📄 Gerador de Documentação (.yml)":
+        render_yaml_documentation_generator(config)
+    elif app_mode == "🔍 Mapeador de Colunas (Legacy -> Atual)":
+        render_column_mapper(config)
+    elif app_mode == "🏹 Conversor CRM XML -> SQL":
+        render_crm_xml_converter(config)
     elif app_mode == "📚 Dicionário e Perfil de Dados (Profiling)":
         render_data_dictionary_and_profiling(config)
     elif app_mode == "⚡ Otimizador e Revisor SQL (Linter)":
         render_sql_optimizer(config)
     elif app_mode == "⚖️ Comparador de Ambientes (Dev vs Prod)":
         render_environment_comparator(config)
+    elif app_mode == "🛡️ Analisador de Impacto em BI":
+        render_bi_impact_checker(config)
+    elif app_mode == "🚀 DevOps & CI/CD Hub (Auto-PR)":
+        render_devops_automation(config)
 
 
 
