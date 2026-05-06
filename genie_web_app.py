@@ -1589,19 +1589,19 @@ def render_sidebar() -> Dict[str, Any]:
         app_mode = st.radio(
             "Navegação", 
             [
-                "🏗️ Criar Novo Genie Space (API)",
+                "🌠 Criar Novo Genie Space (API)",
                 "💬 Genie Chat", 
+                "📚 Dicionário e Perfil de Dados (Profiling)",
                 "🛠️ Gerador de Modelos dbt/Jinja",
                 "📄 Gerador de Documentação (.yml)",
+                "⚡ Otimizador e Revisor SQL (Linter)",
                 "🔍 Mapeador de Colunas (Legacy -> Atual)",
                 "🏹 Conversor CRM XML -> SQL",
-                "📚 Dicionário e Perfil de Dados (Profiling)", 
-                "⚡ Otimizador e Revisor SQL (Linter)",
                 "⚖️ Comparador de Ambientes (Dev vs Prod)",
                 "🛡️ Analisador de Impacto em BI",
                 "🚀 DevOps & CI/CD Hub (Auto-PR)"
-            ]
-
+            ],
+            index=1 # Mantém o Chat como padrão se preferir, ou 0 para o Criar Space
         )
 
 
@@ -2760,7 +2760,7 @@ def render_environment_comparator(config: Dict[str, Any]) -> None:
 
 def render_create_genie_space(config: Dict[str, Any]) -> None:
     log_usage("Create Genie Space")
-    st.header("🏗️ Criar Novo Genie Space (via API)")
+    st.header("🌠 Criar Novo Genie Space (via API)")
     st.write("Utilize esta ferramenta para provisionar um novo espaço do Genie programaticamente.")
     
     if not config.get("host") or not config.get("token"):
@@ -3429,7 +3429,7 @@ def main() -> None:
     render_top_branding()
     ui_mode = render_interface_mode_top()
 
-    if app_mode == "🏗️ Criar Novo Genie Space (API)":
+    if app_mode == "🌠 Criar Novo Genie Space (API)":
         render_create_genie_space(config)
     elif app_mode == "💬 Genie Chat":
         run_genie_chat_mode(config, ui_mode)

@@ -35,6 +35,8 @@ O **Genie RJZ Cyrela** é um portal de desenvolvimento que centraliza ferramenta
 - Visualizar linhagem de dados com grafos interativos.
 - **Automatizar o deploy de modelos dbt com abertura automática de Pull Requests no Azure DevOps.**
 - **Analisar o impacto de mudanças de query em dashboards de BI.**
+- **Mapear colunas legadas para o ambiente atual com tabelas de confiança.**
+- **Converter XMLs de Localização Avançada do CRM para SQL Databricks.**
 - **Provisionar novos Genie Spaces programaticamente via API.**
 
 ---
@@ -112,12 +114,29 @@ Integração direta com o **Azure DevOps** para automatizar o ciclo de vida do d
 
 ---
 
-### 🏗️ Criar Novo Genie Space (API)
+### 🌠 Criar Novo Genie Space (API)
 
 Ferramenta administrativa para criar novos espaços do Genie sem sair do portal.
 - Navegação via Unity Catalog para seleção de tabelas.
 - Geração automática do `serialized_space` JSON.
 - Ordenação automática de identificadores de tabelas (Requisito da API Databricks).
+
+---
+
+### 🔍 Mapeador de Colunas (Legacy → Atual)
+
+Compare uma query antiga ou uma lista de colunas legadas com o esquema atual do seu Genie Space para identificar as correspondências corretas.
+- Sugestões de nomes atuais.
+- Nível de confiança no mapeamento.
+- Explicações detalhadas de de-para.
+
+---
+
+### 🏹 Conversor CRM XML → SQL
+
+Converta um XML de 'Localização Avançada' do CRM em uma query SQL/dbt compatível com o ambiente atual.
+- Mapeamento automático de entidades CRM para tabelas Unity Catalog.
+- Tradução de filtros e joins complexos.
 
 ---
 
@@ -260,12 +279,19 @@ python genie_chat.py --question "Top 10 clientes por receita" --no-followup
 
 ### Navegação
 
-No modo **Desenvolvedor**, a barra lateral apresenta o menu **"Ferramentas do Dev"** com 4 opções:
+No modo **Desenvolvedor**, a barra lateral apresenta o menu **"Ferramentas do Dev"** com as seguintes ferramentas organizadas por fluxo:
 
-1. **💬 Genie Chat** — Chat com dados via linguagem natural.
-2. **📚 Dicionário e Perfil de Dados** — Selecione uma tabela e veja o esquema + profiling.
-3. **⚡ Otimizador e Revisor SQL** — Cole uma query e receba sugestões de melhoria.
-4. **⚖️ Comparador de Ambientes** — Compare colunas entre Dev e Prod.
+1.  **🌠 Criar Novo Genie Space (API)** — Setup de novos espaços.
+2.  **💬 Genie Chat** — Chat com dados via linguagem natural.
+3.  **📚 Dicionário e Perfil de Dados** — Esquema + profiling.
+4.  **🛠️ Gerador de Modelos dbt/Jinja** — Criação de modelos `.sql`.
+5.  **📄 Gerador de Documentação (.yml)** — Criação de `schema.yml`.
+6.  **⚡ Otimizador e Revisor SQL** — Sugestões de performance.
+7.  **🔍 Mapeador de Colunas** — De-para de campos legados.
+8.  **🏹 Conversor CRM XML → SQL** — Tradução de FetchXML.
+9.  **⚖️ Comparador de Ambientes** — Diferenças entre Dev e Prod.
+10. **🛡️ Analisador de Impacto em BI** — Riscos de quebra de dashboards.
+11. **🚀 DevOps & CI/CD Hub** — Deploy e PRs automáticos.
 
 ### Dicas
 
