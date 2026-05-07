@@ -35,6 +35,10 @@ from genie_chat import (
     extract_message_id,
     wait_for_terminal_message,
 )
+from auth import init_db, get_user_tokens
+from auth_ui import render_auth_ui, render_token_setup_ui
+
+
 
 class AzureDevOpsClient:
     def __init__(self, organization: str, project: str, repository: str, pat: str):
@@ -1656,10 +1660,10 @@ def render_sidebar() -> Dict[str, Any]:
 
         st.divider()
         st.header("Azure DevOps Integration")
-        devops_pat = st.text_input("ADO_PAT (Personal Access Token)", value="9P6J0J0OYhdykTgrEh7WQMfrNIMy8fC4bJI7SNJsBOAP5TnRHIFrJQQJ99CEACAAAAAyghytAAASAZDO1ETp", type="password", key="config_devops_pat")
-        devops_org = st.text_input("ADO_ORG", value="cyrela-data-analytics", key="config_devops_org")
-        devops_proj = st.text_input("ADO_PROJECT", value="Data Analytics", key="config_devops_proj")
-        devops_repo = st.text_input("ADO_REPO", value="lakehouse", key="config_devops_repo")
+        devops_pat = st.text_input("ADO_PAT (Personal Access Token)", value=st.session_state.get("config_devops_pat", ""), type="password", key="config_devops_pat_sidebar")
+        devops_org = st.text_input("ADO_ORG", value=st.session_state.get("config_devops_org", "cyrela-data-analytics"), key="config_devops_org_sidebar")
+        devops_proj = st.text_input("ADO_PROJECT", value=st.session_state.get("config_devops_proj", "Data Analytics"), key="config_devops_proj_sidebar")
+        devops_repo = st.text_input("ADO_REPO", value=st.session_state.get("config_devops_repo", "lakehouse"), key="config_devops_repo_sidebar")
 
         avatar_source = ASSETS_DIR / AGENT_SOURCE_IMAGE_NAME
         if not avatar_source.exists():
@@ -3414,8 +3418,45 @@ def run_genie_chat_mode(config: Dict[str, Any], ui_mode: str) -> None:
 
 def main() -> None:
     load_dotenv(dotenv_path=APP_ROOT / ".env")
+    init_db()
+    
     setup_page()
+    
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+        
+    if not st.session_state.authenticated:
+        render_auth_ui()
+        return
+        
+    user_email = st.session_state.get('user_email', '')
+    user_tokens = get_user_tokens(user_email)
+    
+    # Se o usuário não é admin (ou se você quiser que o admin também defina), 
+    # verificamos se os tokens estão preenchidos.
+    if not user_tokens['host'] or not user_tokens['token'] or not user_tokens['ado_pat']:
+        render_token_setup_ui(user_email, 
+                              user_tokens['host'], user_tokens['token'], user_tokens['space_id'],
+                              user_tokens['ado_org'], user_tokens['ado_project'], user_tokens['ado_repo'], user_tokens['ado_pat'])
+        return
+        
     init_state()
+    
+    # Sobrescreve as variáveis de ambiente com os tokens individuais do usuário
+    st.session_state.config_host = user_tokens['host']
+    st.session_state.config_token = user_tokens['token']
+    st.session_state.config_space_id = user_tokens['space_id']
+    
+    st.session_state.config_devops_org = user_tokens['ado_org']
+    st.session_state.config_devops_proj = user_tokens['ado_project']
+    st.session_state.config_devops_repo = user_tokens['ado_repo']
+    st.session_state.config_devops_pat = user_tokens['ado_pat']
+
+    st.sidebar.markdown(f"👤 Logado como **{user_email}**")
+    if st.sidebar.button("🚪 Sair", use_container_width=True):
+        st.session_state.authenticated = False
+        st.rerun()
+    st.sidebar.divider()
 
     apply_sidebar_visibility(st.session_state.active_ui_mode)
 
