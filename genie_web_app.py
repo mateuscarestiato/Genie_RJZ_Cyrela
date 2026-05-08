@@ -35,7 +35,7 @@ from genie_chat import (
     extract_message_id,
     wait_for_terminal_message,
 )
-from auth import init_db, get_user_tokens
+from auth import init_db, get_user_tokens, update_user_tokens
 from auth_ui import render_auth_ui, render_token_setup_ui
 
 
@@ -1671,6 +1671,24 @@ def render_sidebar() -> Dict[str, Any]:
                 "Para usar sua imagem do agente, salve o PNG em "
                 f"{avatar_source}. O recorte quadrado central e automatico."
             )
+
+        st.divider()
+        if st.button("💾 Salvar Credenciais no Meu Perfil", use_container_width=True, type="primary"):
+            user_email = st.session_state.get("user_email")
+            if user_email:
+                space_id_to_save = str(st.session_state.get("chat_selected_space_id") or os.getenv("GENIE_SPACE_ID", "")).strip()
+                update_user_tokens(
+                    user_email, 
+                    str(host).strip(), 
+                    str(token).strip(), 
+                    space_id_to_save, 
+                    str(devops_org).strip(), 
+                    str(devops_proj).strip(), 
+                    str(devops_repo).strip(), 
+                    str(devops_pat).strip()
+                )
+                st.success("Configurações salvas com sucesso no seu perfil na nuvem!")
+
 
     return {
         "host": str(host).strip(),
