@@ -176,7 +176,10 @@ def render_token_setup_ui(email, current_host, current_token, current_space, cur
           1. Abra o Databricks.
           2. Clique no seu perfil (canto superior direito) -> **Settings**.
           3. Vá em **Developer** -> **Access tokens**.
-          4. Clique em **Generate new token**. Copie e cole aqui.
+          4. Clique em **Generate new token**.
+          5. No campo **Scope**, selecione **Other APIs**.
+          6. No campo **API scope(s)**, selecione **all-apis**.
+          7. Clique em **Generate**, copie o token e cole aqui.
         
         <hr>
         
