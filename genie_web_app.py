@@ -1731,7 +1731,7 @@ def apply_sidebar_visibility(active_ui_mode: str) -> None:
 
 
 def render_interface_mode_top() -> str:
-    # Modo de Usuário removido. Agora fixado em Desenvolvedor.
+    # Fixado em modo completo (antigo Desenvolvedor)
     st.session_state.active_ui_mode = UI_MODE_DEVELOPER
     return UI_MODE_DEVELOPER
 
@@ -1750,7 +1750,7 @@ def render_chat_actions_below_input(ui_mode: str) -> None:
             st.session_state[mode_keys["conversation_id"]] = None
             st.session_state[mode_keys["messages"]] = []
             st.session_state[mode_keys["queued_question"]] = None
-            st.success(f"Conversa reiniciada no modo {ui_mode}.")
+            st.success("Conversa reiniciada.")
 
     with action_col_b:
         if st.button(
@@ -1761,7 +1761,7 @@ def render_chat_actions_below_input(ui_mode: str) -> None:
         ):
             st.session_state[mode_keys["messages"]] = []
             st.session_state[mode_keys["queued_question"]] = None
-            st.success(f"Histórico local limpo no modo {ui_mode}.")
+            st.success("Histórico local limpo.")
 
 
 def build_final_question(question: str, advanced_mode: bool, ui_mode: str) -> str:
@@ -1773,16 +1773,10 @@ def build_final_question(question: str, advanced_mode: bool, ui_mode: str) -> st
             "tendencias relevantes, outliers, riscos, oportunidades e proximos passos."
         )
 
-    if ui_mode == UI_MODE_USER:
-        instructions.append(
-            "Responda em modo Usuario: linguagem simples, didatica e orientada a negocio; "
-            "evite jargao tecnico desnecessario e destaque conclusao pratica."
-        )
-    else:
-        instructions.append(
-            "Responda em modo Desenvolvedor: inclua detalhes tecnicos, racional da analise, "
-            "query SQL e observacoes de qualidade dos dados quando aplicavel."
-        )
+    instructions.append(
+        "Inclua detalhes tecnicos, racional da analise, "
+        "query SQL e observacoes de qualidade dos dados quando aplicavel."
+    )
 
     instructions.append(
         "Use ao maximo os recursos do Databricks Genie nesta resposta: "
@@ -1898,7 +1892,7 @@ def render_messages(ui_mode: str) -> None:
                 continue
 
             status = message.get("status")
-            if status and ui_mode == "Desenvolvedor":
+            if status:
                 st.markdown(f"Status da mensagem: **{status}**")
 
             text = message.get("text")
@@ -1912,9 +1906,8 @@ def render_messages(ui_mode: str) -> None:
             if not isinstance(analytics_payload, dict):
                 analytics_payload = {}
 
-            if ui_mode == "Desenvolvedor":
-                for warning in message.get("warnings", []):
-                    st.warning(warning)
+            for warning in message.get("warnings", []):
+                st.warning(warning)
 
             datasets = message.get("datasets", [])
             if datasets:
@@ -1946,7 +1939,7 @@ def render_messages(ui_mode: str) -> None:
                         msg_idx,
                         dataset_idx,
                         analytics_payload,
-                        show_query_details=(ui_mode == "Desenvolvedor"),
+                        show_query_details=True,
                     )
 
             insights = message.get("genie_insights", [])
@@ -3420,7 +3413,7 @@ def main() -> None:
 
     apply_sidebar_visibility(st.session_state.active_ui_mode)
 
-    # Forçamos sempre o modo render_sidebar() pois o modo Usuário foi removido
+    # Forçamos sempre a barra lateral e ferramentas completas
     config = render_sidebar()
     app_mode = st.session_state.get("app_mode", "💬 Genie Chat")
 
