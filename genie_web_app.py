@@ -1742,53 +1742,9 @@ def apply_sidebar_visibility(active_ui_mode: str) -> None:
 
 
 def render_interface_mode_top() -> str:
-    st.markdown(
-        "<h3 style='text-align:center; margin-bottom:0.2rem;'>Controle do Chat</h3>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center; margin-top:0; color: rgba(49, 51, 63, 0.65);'>"
-        "Cada modo possui conversa independente. Selecione o modo e acione os comandos abaixo."
-        "</p>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("**Escolha o modo da interface**")
-    col_user_mode, col_dev_mode = st.columns(2)
-    with col_user_mode:
-        user_is_active = st.session_state.active_ui_mode == UI_MODE_USER
-        if st.button(
-            "Usuário",
-            key="active_ui_mode_user",
-            type="primary" if user_is_active else "secondary",
-            use_container_width=True,
-            help=(
-                "Modo Usuário: foco em explicação simples e objetiva, linguagem de negócio, "
-                "com menor detalhe técnico e SQL apenas quando essencial."
-            ),
-        ):
-            st.session_state.active_ui_mode = UI_MODE_USER
-            st.rerun()
-
-    with col_dev_mode:
-        dev_is_active = st.session_state.active_ui_mode == UI_MODE_DEVELOPER
-        if st.button(
-            "Desenvolvedor",
-            key="active_ui_mode_dev",
-            type="primary" if dev_is_active else "secondary",
-            use_container_width=True,
-            help=(
-                "Modo Desenvolvedor: foco em detalhe técnico, SQL, métrica, validação e rastreabilidade "
-                "da resposta para analise aprofundada."
-            ),
-        ):
-            st.session_state.active_ui_mode = UI_MODE_DEVELOPER
-            st.rerun()
-
-    selected_mode = st.session_state.active_ui_mode
-    st.caption(f"Modo ativo: {selected_mode}")
-
-    return selected_mode
+    # Ocultado conforme solicitação do usuário, fixado no modo Desenvolvedor
+    st.session_state.active_ui_mode = UI_MODE_DEVELOPER
+    return UI_MODE_DEVELOPER
 
 
 def render_chat_actions_below_input(ui_mode: str) -> None:
@@ -2805,13 +2761,8 @@ def render_create_genie_space(config: Dict[str, Any]) -> None:
             except:
                 pass
         
-        warehouse_id = st.text_input(
-            "SQL Warehouse ID", 
-            value=default_wh, 
-            placeholder="Ex: ab0de84dfac97072",
-            type="password",
-            help="O ID ou Path do Warehouse. Use o ícone de olho para conferir o valor."
-        )
+        # Campo fixo nos bastidores, não renderizado na tela para evitar erros
+        warehouse_id = default_wh if default_wh else "ab0de84dfac97072"
 
     description = st.text_area("Descrição (Opcional)", placeholder="Descreva o propósito deste espaço...")
 
