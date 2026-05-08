@@ -1,6 +1,5 @@
-import sqlite3
-import hashlib
 import os
+import hashlib
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -8,48 +7,67 @@ import random
 from datetime import datetime, timedelta
 import streamlit as st
 
-DB_FILE = "auth.db"
+# ---- NOVO: Supabase e Criptografia ----
+from supabase import create_client, Client
+from cryptography.fernet import Fernet
+
 EMAIL_SUFFIX = "@rjzcyrela.com.br"
 
+def get_supabase() -> Client:
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    if not url or not key:
+        st.error("ERRO: SUPABASE_URL ou SUPABASE_KEY não configurado nas variáveis de ambiente.")
+    return create_client(url, key)
+
+def get_cipher() -> Fernet:
+    key = os.environ.get("ENCRYPTION_KEY")
+    if not key:
+        st.warning("ENCRYPTION_KEY não configurada. Usando chave temporária (tokens serão perdidos ao reiniciar).")
+        key = Fernet.generate_key().decode('utf-8')
+        os.environ["ENCRYPTION_KEY"] = key
+    return Fernet(key.encode('utf-8'))
+
+def encrypt_token(token: str) -> str:
+    if not token:
+        return ""
+    cipher = get_cipher()
+    return cipher.encrypt(token.encode('utf-8')).decode('utf-8')
+
+def decrypt_token(encrypted_token: str) -> str:
+    if not encrypted_token:
+        return ""
+    try:
+        cipher = get_cipher()
+        return cipher.decrypt(encrypted_token.encode('utf-8')).decode('utf-8')
+    except Exception as e:
+        print(f"Erro ao descriptografar token: {e}")
+        return ""
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            email TEXT PRIMARY KEY,
-            password_hash TEXT,
-            is_admin INTEGER,
-            databricks_host TEXT,
-            databricks_token TEXT,
-            genie_space_id TEXT,
-            ado_org TEXT,
-            ado_project TEXT,
-            ado_repo TEXT,
-            ado_pat TEXT
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS otp_codes (
-            email TEXT,
-            code TEXT,
-            expires_at DATETIME,
-            type TEXT
-        )
-    ''')
-    
-    # Create default admin if not exists
-    admin_email = "admin"
-    admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
-    c.execute("SELECT email FROM users WHERE email=?", (admin_email,))
-    if not c.fetchone():
-        c.execute("INSERT INTO users (email, password_hash, is_admin, databricks_host, databricks_token, genie_space_id, ado_org, ado_project, ado_repo, ado_pat) VALUES (?, ?, ?, '', '', '', 'cyrela-data-analytics', 'Data Analytics', 'lakehouse', '')",
-                  (admin_email, hash_password(admin_pass), 1))
+    try:
+        supabase = get_supabase()
+        admin_email = "admin"
+        admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
         
-    conn.commit()
-    conn.close()
+        response = supabase.table("users").select("email").eq("email", admin_email).execute()
+        if not response.data:
+            supabase.table("users").insert({
+                "email": admin_email,
+                "password_hash": hash_password(admin_pass),
+                "is_admin": 1,
+                "databricks_host": "",
+                "databricks_token": encrypt_token(""),
+                "genie_space_id": "",
+                "ado_org": "cyrela-data-analytics",
+                "ado_project": "Data Analytics",
+                "ado_repo": "lakehouse",
+                "ado_pat": encrypt_token("")
+            }).execute()
+    except Exception as e:
+        print(f"Erro ao inicializar admin no Supabase: {e}")
 
 def hash_password(password: str) -> str:
-    # Simples hash SHA-256 (idealmente usar bcrypt, mas mantendo sem novas dependências)
     salt = "cyrela_sec_"
     return hashlib.sha256((salt + password).encode()).hexdigest()
 
@@ -57,102 +75,118 @@ def check_password(password: str, hashed: str) -> bool:
     return hash_password(password) == hashed
 
 def user_exists(email: str) -> bool:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT email FROM users WHERE email=?", (email,))
-    res = c.fetchone()
-    conn.close()
-    return res is not None
+    try:
+        supabase = get_supabase()
+        response = supabase.table("users").select("email").eq("email", email).execute()
+        return len(response.data) > 0
+    except Exception:
+        return False
 
 def create_user(email: str, password: str, is_admin: int = 0):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO users (email, password_hash, is_admin, databricks_host, databricks_token, genie_space_id, ado_org, ado_project, ado_repo, ado_pat) VALUES (?, ?, ?, '', '', '', 'cyrela-data-analytics', 'Data Analytics', 'lakehouse', '')",
-              (email, hash_password(password), is_admin))
-    conn.commit()
-    conn.close()
+    supabase = get_supabase()
+    supabase.table("users").insert({
+        "email": email,
+        "password_hash": hash_password(password),
+        "is_admin": is_admin,
+        "databricks_host": "",
+        "databricks_token": encrypt_token(""),
+        "genie_space_id": "",
+        "ado_org": "cyrela-data-analytics",
+        "ado_project": "Data Analytics",
+        "ado_repo": "lakehouse",
+        "ado_pat": encrypt_token("")
+    }).execute()
 
 def verify_login(email: str, password: str) -> dict:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT password_hash, is_admin FROM users WHERE email=?", (email,))
-    res = c.fetchone()
-    conn.close()
-    if res and check_password(password, res[0]):
-        return {"success": True, "is_admin": bool(res[1])}
+    try:
+        supabase = get_supabase()
+        response = supabase.table("users").select("password_hash, is_admin").eq("email", email).execute()
+        if response.data:
+            user = response.data[0]
+            if check_password(password, user["password_hash"]):
+                return {"success": True, "is_admin": bool(user["is_admin"])}
+    except Exception as e:
+        print(f"Erro no login: {e}")
     return {"success": False}
 
 def update_password(email: str, new_password: str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE users SET password_hash=? WHERE email=?", (hash_password(new_password), email))
-    conn.commit()
-    conn.close()
+    supabase = get_supabase()
+    supabase.table("users").update({
+        "password_hash": hash_password(new_password)
+    }).eq("email", email).execute()
 
 def get_user_tokens(email: str) -> dict:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT databricks_host, databricks_token, genie_space_id, ado_org, ado_project, ado_repo, ado_pat FROM users WHERE email=?", (email,))
-    res = c.fetchone()
-    conn.close()
-    if res:
-        return {
-            "host": res[0] or "", "token": res[1] or "", "space_id": res[2] or "",
-            "ado_org": res[3] or "cyrela-data-analytics", 
-            "ado_project": res[4] or "Data Analytics", 
-            "ado_repo": res[5] or "lakehouse", 
-            "ado_pat": res[6] or ""
-        }
+    try:
+        supabase = get_supabase()
+        response = supabase.table("users").select(
+            "databricks_host, databricks_token, genie_space_id, ado_org, ado_project, ado_repo, ado_pat"
+        ).eq("email", email).execute()
+        
+        if response.data:
+            res = response.data[0]
+            return {
+                "host": res.get("databricks_host") or "", 
+                "token": decrypt_token(res.get("databricks_token") or ""), 
+                "space_id": res.get("genie_space_id") or "",
+                "ado_org": res.get("ado_org") or "cyrela-data-analytics", 
+                "ado_project": res.get("ado_project") or "Data Analytics", 
+                "ado_repo": res.get("ado_repo") or "lakehouse", 
+                "ado_pat": decrypt_token(res.get("ado_pat") or "")
+            }
+    except Exception as e:
+        print(f"Erro ao obter tokens: {e}")
+        
     return {"host": "", "token": "", "space_id": "", "ado_org": "cyrela-data-analytics", "ado_project": "Data Analytics", "ado_repo": "lakehouse", "ado_pat": ""}
 
 def update_user_tokens(email: str, host: str, token: str, space_id: str, ado_org: str, ado_proj: str, ado_repo: str, ado_pat: str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE users SET databricks_host=?, databricks_token=?, genie_space_id=?, ado_org=?, ado_project=?, ado_repo=?, ado_pat=? WHERE email=?", 
-              (host, token, space_id, ado_org, ado_proj, ado_repo, ado_pat, email))
-    conn.commit()
-    conn.close()
+    supabase = get_supabase()
+    supabase.table("users").update({
+        "databricks_host": host,
+        "databricks_token": encrypt_token(token),
+        "genie_space_id": space_id,
+        "ado_org": ado_org,
+        "ado_project": ado_proj,
+        "ado_repo": ado_repo,
+        "ado_pat": encrypt_token(ado_pat)
+    }).eq("email", email).execute()
 
 def generate_otp(email: str, otp_type: str = "login") -> str:
     code = str(random.randint(100000, 999999))
-    expires = datetime.now() + timedelta(minutes=10)
+    expires = (datetime.now() + timedelta(minutes=10)).isoformat()
     
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # Remove old codes for this email and type
-    c.execute("DELETE FROM otp_codes WHERE email=? AND type=?", (email, otp_type))
-    c.execute("INSERT INTO otp_codes (email, code, expires_at, type) VALUES (?, ?, ?, ?)",
-              (email, code, expires, otp_type))
-    conn.commit()
-    conn.close()
+    supabase = get_supabase()
+    supabase.table("otp_codes").delete().eq("email", email).eq("type", otp_type).execute()
+    supabase.table("otp_codes").insert({
+        "email": email,
+        "code": code,
+        "expires_at": expires,
+        "type": otp_type
+    }).execute()
     return code
 
 def verify_otp(email: str, code: str, otp_type: str = "login") -> bool:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT expires_at FROM otp_codes WHERE email=? AND code=? AND type=?", (email, code, otp_type))
-    res = c.fetchone()
-    
-    if res:
-        expires_at = datetime.strptime(res[0], "%Y-%m-%d %H:%M:%S.%f")
-        if datetime.now() <= expires_at:
-            c.execute("DELETE FROM otp_codes WHERE email=? AND type=?", (email, otp_type))
-            conn.commit()
-            conn.close()
-            return True
-            
-    conn.close()
+    try:
+        supabase = get_supabase()
+        response = supabase.table("otp_codes").select("expires_at").eq("email", email).eq("code", code).eq("type", otp_type).execute()
+        
+        if response.data:
+            expires_at_str = response.data[0]["expires_at"]
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if datetime.now() <= expires_at:
+                supabase.table("otp_codes").delete().eq("email", email).eq("type", otp_type).execute()
+                return True
+    except Exception as e:
+        print(f"Erro ao verificar OTP: {e}")
+        
     return False
 
 def send_email(to_email: str, subject: str, body: str):
-    # Tenta usar o servidor SMTP configurado no .env
     smtp_server = os.getenv("SMTP_SERVER")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
     smtp_user = os.getenv("SMTP_USER")
     smtp_pass = os.getenv("SMTP_PASS")
     
     if not all([smtp_server, smtp_user, smtp_pass]):
-        # Fallback: Apenas imprime no console e mostra no Streamlit se não houver SMTP configurado
         st.info(f"📧 **EMAIL SIMULADO (SMTP não configurado)**\n\n**Para:** {to_email}\n**Assunto:** {subject}\n\n{body}")
         print(f"--- EMAIL TO {to_email} ---\nSubject: {subject}\n{body}\n-------------------")
         return True
