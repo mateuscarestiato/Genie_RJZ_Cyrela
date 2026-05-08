@@ -76,7 +76,7 @@ def render_auth_ui():
 
 def _render_login():
     st.subheader("Login")
-    email_prefix = st.text_input("E-mail corporativo ou admin", placeholder="seu.nome")
+    email_prefix = st.text_input("E-mail corporativo", placeholder="seu.nome")
     password = st.text_input("Senha", type="password", autocomplete="new-password")
     
     st.markdown("<br>", unsafe_allow_html=True)
