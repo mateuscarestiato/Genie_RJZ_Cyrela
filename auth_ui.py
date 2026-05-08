@@ -75,7 +75,7 @@ def render_auth_ui():
         _render_reset_password()
 
 def _render_login():
-    st.subheader("Login (v2)")
+    st.subheader("Login")
     email_prefix = st.text_input("E-mail corporativo", placeholder="seu.nome")
     password = st.text_input("Senha", type="password", autocomplete="new-password")
     
