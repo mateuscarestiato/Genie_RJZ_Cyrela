@@ -1726,23 +1726,12 @@ def get_config_from_state() -> Dict[str, Any]:
 
 
 def apply_sidebar_visibility(active_ui_mode: str) -> None:
-    if active_ui_mode == UI_MODE_USER:
-        st.markdown(
-            """
-            <style>
-            div[data-testid="stSidebar"],
-            section[data-testid="stSidebarNav"],
-            div[data-testid="stSidebarContent"] {
-                display: none;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+    # Barra lateral sempre visível conforme solicitado
+    pass
 
 
 def render_interface_mode_top() -> str:
-    # Ocultado conforme solicitação do usuário, fixado no modo Desenvolvedor
+    # Modo de Usuário removido. Agora fixado em Desenvolvedor.
     st.session_state.active_ui_mode = UI_MODE_DEVELOPER
     return UI_MODE_DEVELOPER
 
@@ -2750,19 +2739,21 @@ def render_create_genie_space(config: Dict[str, Any]) -> None:
     col1, col2 = st.columns(2)
     with col1:
         title = st.text_input("Título do Space", placeholder="Ex: Analítico Financeiro RJZ")
-    with col2:
-        # Try to get warehouse_id from current space to use as default
-        default_wh = ""
+    
+    # Gerenciamento estável do Warehouse ID via session_state para evitar 'sumiço' durante reruns
+    if "create_space_warehouse_id" not in st.session_state:
+        st.session_state.create_space_warehouse_id = "ab0de84dfac97072" # Default fallback
         if config.get("host") and config.get("token") and config.get("space_id"):
             try:
                 client_temp = GenieApiClient(config["host"], config["token"], config["space_id"])
                 space_info = client_temp.get_space()
-                default_wh = space_info.get("warehouse_id", "")
+                wh_id = space_info.get("warehouse_id", "")
+                if wh_id:
+                    st.session_state.create_space_warehouse_id = wh_id
             except:
                 pass
-        
-        # Campo fixo nos bastidores, não renderizado na tela para evitar erros
-        warehouse_id = default_wh if default_wh else "ab0de84dfac97072"
+    
+    warehouse_id = st.session_state.create_space_warehouse_id
 
     description = st.text_area("Descrição (Opcional)", placeholder="Descreva o propósito deste espaço...")
 
@@ -3429,12 +3420,9 @@ def main() -> None:
 
     apply_sidebar_visibility(st.session_state.active_ui_mode)
 
-    if st.session_state.active_ui_mode == UI_MODE_USER:
-        config = get_config_from_state()
-        app_mode = "💬 Genie Chat"
-    else:
-        config = render_sidebar()
-        app_mode = st.session_state.get("app_mode", "💬 Genie Chat")
+    # Forçamos sempre o modo render_sidebar() pois o modo Usuário foi removido
+    config = render_sidebar()
+    app_mode = st.session_state.get("app_mode", "💬 Genie Chat")
 
     render_top_branding()
     ui_mode = render_interface_mode_top()
